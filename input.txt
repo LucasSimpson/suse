@@ -1,3 +1,58 @@
+|x.(
+	|y.(
+		!x (y)
+	) (2)
+) (
+	|z.( + (z) (z) )
+)
+
+
+	|z.(
+		|w. ( + (w) (z) )
+	) (10)
+
+FunctionContext {
+	symbolStack = Stack ["x"], 
+	symbolTable = [("y", Constant 2)], 
+	expression = ExpFunctionCall (FunctionCall "x" (Stack [ExpBoundVar (BoundVar "y")]))
+}
+
+
+
+|f.(
+	|x.(
+		!f (!x (x))
+	)(
+		|z.(
+			!f (!z (z))
+		)
+	)
+)
+(
+	|n.(
+		|rec.(
+			if (n) then (!rec (n - 1) (rec)) else (1)
+		)
+	) (3)
+)
+
+FunctionContext {
+	symbolStack = Stack ["y","f"], 
+	symbolTable = [("x", FunctionContext {
+		symbolStack = Stack ["z"], 
+		symbolTable = [], 
+		expression = FunctionCall "f" (Stack [
+			FunctionCall "z" (Stack [ExpBoundVar (BoundVar "z")])
+		])
+	})], 
+
+	expression = FunctionCall "f" (Stack [
+		FunctionCall "x" (Stack [ExpBoundVar (BoundVar "x")])
+	])
+}
+
+
+
 
 
 |a.(

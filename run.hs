@@ -294,91 +294,131 @@ bindST st s x = st ++ [(s, x)]
 
 -- AST model -- 
 
-data Expression = CEXP Context | MEXP MathExp deriving Show
-
-data Context = Context {
-    symbolStack :: Stack String,
-    symbolTable :: SymbolTable Expression,
-    expression :: Expression
-    } deriving Show
 
 data MathOpType = Add | Sub | Mul deriving Show
-data MathExp = MFunc Symbol (Stack Expression) | MVariable Symbol | MConstant Integer | MNode MathOpType Expression Expression deriving Show
+data MathOp = MNode MathOpType Expression Expression deriving Show
+
+data Constant = Constant Integer deriving Show
+data BoundVar = BoundVar Symbol deriving Show
+data FunctionCall = FunctionCall Symbol (Stack Expression) deriving Show
+data FunctionContext = FunctionContext {
+        symbolStack :: Stack String,
+        symbolTable :: SymbolTable Expression,
+        expression :: Expression
+    } deriving Show
+
+data IfStatement = IfStatement Expression Expression Expression deriving Show
+
+data Expression =   ExpFunctionContext FunctionContext | 
+                    ExpMathOp MathOp | 
+                    ExpConst Constant |
+                    ExpBoundVar BoundVar |
+                    ExpFunctionCall FunctionCall |
+                    ExpIfStatement IfStatement
+
+                    deriving Show
 
 -- evaluate AST --
 
-meval :: SymbolTable Expression -> Expression -> Either String Integer
-meval st (MEXP (MConstant x)) = Right x
-meval st (MEXP (MNode Add x y)) = do 
-    a <- (meval st x)
-    b <- (meval st y)
-    Right $ a + b
-meval st (MEXP (MNode Sub x y)) = do 
-    a <- (meval st x)
-    b <- (meval st y)
-    Right $ a - b
-meval st (MEXP (MNode Mul x y)) = do 
-    a <- (meval st x)
-    b <- (meval st y)
-    Right $ a * b
+class Solvable a where
+    solve :: SymbolTable Expression -> a -> Either String Integer
 
-meval st (MEXP (MVariable symbol)) = maybeToEither errMessage (lookupSymbol st symbol) >>= meval st where
-    errMessage = "Symbol " ++ symbol ++ " not found"
+instance Solvable Constant where
+    solve st (Constant x) = Right x
 
-meval st (MEXP (MFunc funcSymbol argStack)) = maybeToEither errMessage (lookupSymbol st funcSymbol) >>= compute where
-    errMessage = "Function " ++ funcSymbol ++ " not found"
-    compute :: Expression -> Either String Integer
-    compute (MEXP mExp) = Left $ "Illegal invocation of math expression as a function\nSymbol: " ++ funcSymbol
-    compute (CEXP (Context ss nst exp)) = meval (bindArgs argStack ss) exp where
-            bindArgs :: Stack Expression -> Stack String -> SymbolTable Expression
-            bindArgs argStack symStack = mGetOrElse (do
-                argMExp <- peek argStack
-                boundVar <- peek symStack
-                Just $ bindST (recursedST) boundVar argMExp) (st ++ nst) where
-                    newArgStack = snd . pop $ argStack
-                    newSymStack = snd . pop $ symStack
-                    recursedST = bindArgs newArgStack newSymStack
+instance Solvable BoundVar where
+    solve st (BoundVar symbol) = maybeToEither errMessage (lookupSymbol st symbol) >>= solve st where
+        errMessage = "Symbol " ++ symbol ++ " not found"
 
-meval st (CEXP (Context ss nst exp)) = meval (st ++ nst) exp
+instance Solvable FunctionCall where
+    solve st (FunctionCall funcSymbol argStack) = maybeToEither errMessage (lookupSymbol st funcSymbol) >>= ncompute where
+        errMessage = "Function " ++ funcSymbol ++ " not found"
+        ncompute :: Expression -> Either String Integer
+        ncompute (ExpFunctionContext (FunctionContext ss nst exp)) = solve (bindArgs argStack ss) exp where
+                bindArgs :: Stack Expression -> Stack String -> SymbolTable Expression
+                bindArgs argStack symStack = mGetOrElse (do
+                    argMExp <- peek argStack
+                    boundVar <- peek symStack
+                    Just $ bindST (recursedST) boundVar argMExp) (st ++ nst) where
+                        newArgStack = snd . pop $ argStack
+                        newSymStack = snd . pop $ symStack
+                        recursedST = bindArgs newArgStack newSymStack
+        ncompute exp = Left $ "Illegal invocation of non-function expression as a function\nSymbol: " ++ funcSymbol
+        
+instance Solvable MathOp where
+    solve st (MNode Add x y) = do 
+        a <- (solve st x)
+        b <- (solve st y)
+        Right $ a + b
+    solve st (MNode Sub x y) = do 
+        a <- (solve st x)
+        b <- (solve st y)
+        Right $ a - b
+    solve st (MNode Mul x y) = do 
+        a <- (solve st x)
+        b <- (solve st y)
+        Right $ a * b
+
+instance Solvable FunctionContext where
+    solve st (FunctionContext ss nst exp) = solve (st ++ nst) exp
+
+instance Solvable IfStatement where
+    solve st (IfStatement cond trueExp falseExp) = do
+        condResult <- solve st cond
+        if (condResult > 0) then solve st trueExp else solve st falseExp
+
+instance Solvable Expression where
+    solve st (ExpMathOp exp) = solve st exp
+    solve st (ExpFunctionContext exp) = solve st exp
+    solve st (ExpConst exp) = solve st exp
+    solve st (ExpBoundVar exp) = solve st exp
+    solve st (ExpFunctionCall exp) = solve st exp
+    solve st (ExpIfStatement exp) = solve st exp
+
 
 -- parse text to AST --
 
-parseMathExp :: Parser Char MathExp
+parseMathExp :: Parser Char Expression
 parseMathExp =  let mathOp = fmap doMathOpp $ anyOf "+-*" .>>. (w >>. pBrackets openExp) .>>. (w >>. pBrackets openExp)
                     funcCall = fmap doFuncOpp $ pchar '!' >>. pword .>>. (many (w >>. pBrackets openExp))
-                    constant = fmap MConstant pint
-                    variable = fmap MVariable pword
+                    constant = fmap (ExpConst . Constant) pint
+                    variable = fmap (ExpBoundVar . BoundVar) pword
                     term = constant <|> funcCall <|> variable <|> mathOp 
                 in  (pBrackets term <|> term) <%> "Math Expression" where
-                    doMathOpp (('+', ls), rs) = MNode Add ls rs
-                    doMathOpp (('-', ls), rs) = MNode Sub ls rs
-                    doMathOpp (('*', ls), rs) = MNode Mul ls rs
-                    doFuncOpp (symbol, argList) = MFunc symbol (Stack argList)
+                    doMathOpp (('+', ls), rs) = ExpMathOp (MNode Add ls rs)
+                    doMathOpp (('-', ls), rs) = ExpMathOp (MNode Sub ls rs)
+                    doMathOpp (('*', ls), rs) = ExpMathOp (MNode Mul ls rs)
+                    doFuncOpp (symbol, argList) = ExpFunctionCall . FunctionCall symbol . Stack $ argList
 
+parseFuncDecleration :: Parser Char FunctionContext
+parseFuncDecleration = fmap toFuncExp $ pchar '|' >>. (pword .>> pchar '.') .>>. pBrackets openExp where
+    toFuncExp :: (String, Expression) -> FunctionContext
+    toFuncExp (var, (ExpFunctionContext (FunctionContext symStack st exp))) = FunctionContext (push var symStack) st exp
+    toFuncExp (var, exp) = FunctionContext (Stack [var]) [] (exp)
+    
 
-parseFuncCall :: Parser Char Context
-parseFuncCall = fmap f $ parseFunc .>>. (many (w >>. pBrackets openExp)) where
-
-    toFuncExp :: (String, Expression) -> Context
-    toFuncExp (var, (CEXP (Context symStack st exp))) = Context (push var symStack) st exp
-    toFuncExp (var, (MEXP mExp)) = Context (Stack [var]) [] (MEXP mExp)
-    parseFunc = fmap toFuncExp $ pchar '|' >>. (pword .>> pchar '.') .>>. pBrackets openExp
-
-    f :: (Context, [Expression]) -> Context
-    f (context, ([])) = context
-    f ((Context ss st exp), (x:xs)) = 
-        let rest = f (Context poppedStack st exp, xs)
+parseFuncCall :: Parser Char FunctionContext
+parseFuncCall = fmap f $ parseFuncDecleration .>>. (many (w >>. pBrackets openExp)) where
+    f :: (FunctionContext, [Expression]) -> FunctionContext
+    f (funcContext, ([])) = funcContext
+    f ((FunctionContext ss st exp), (x:xs)) = 
+        let rest = f (FunctionContext poppedStack st exp, xs)
             poppedStack = snd . pop $ ss
             ans = do
                 value <- fst . pop $ ss
-                return $ Context (symbolStack rest) (bindST (symbolTable rest) value x) exp
-        in  mGetOrElse (ans) (Context newStack st exp) 
+                return $ FunctionContext (symbolStack rest) (bindST (symbolTable rest) value x) exp
+        in  mGetOrElse (ans) (FunctionContext newStack st exp) 
+
+parseIfStatement :: Parser Char IfStatement
+parseIfStatement = fmap toIf $ pseq "if" >>. oe .>>. (pseq "then" >>. oe) .>>. (pseq "else" >>. oe) where
+    oe = w >>. pBrackets openExp .>> w
+    toIf ((condExp, trueExp), falseExp) = IfStatement condExp trueExp falseExp
 
 openExp :: Parser Char Expression
-openExp = (fmap CEXP parseFuncCall <|> fmap MEXP parseMathExp) <%> "Expression"
+openExp = (fmap ExpIfStatement parseIfStatement <|> fmap ExpFunctionContext parseFuncCall <|> parseMathExp) <%> "Expression"
 
 debug :: Parser Char (Either String Integer)
-debug = fmap (meval []) (w >>. openExp)
+debug = fmap (solve []) (w >>. openExp)
 -- debug :: Parser Char Expression
 -- debug = openExp
 
