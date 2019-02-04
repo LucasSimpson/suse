@@ -6,13 +6,20 @@ import System.IO
   
 -------------------- MAIN EXECUTION --------------------
 -- read from file, parse, execute, show --
+
 main = do  
     handle <- openFile "input.txt" ReadMode  
-    contents <- hGetContents handle  
-    putStr . (flip (++)) "\n" . pullInfo $ rp debug $ splitNL contents 
+    contents <- hGetContents handle
+    putStr . (flip (++)) "\n" . pullInfo . rp parsed . splitNL $ contents
+    putStr . (flip (++)) "\n" . execute . rp parsed . splitNL $ contents
     hClose handle where
-        pullInfo (Result (either, s)) = show either 
-        pullInfo (failure) = show failure
+        pullInfo (Result (exp, s)) = show exp 
+        pullInfo (failure) = show failure 
+        parsed = w >>. openExp
+        solved = fmap (solve []) parsed
+
+        execute (Result (exp, s)) = show . solve [] $ exp
+        execute (failure) = show failure
 
 -------------------- generic helper dat / funcs --------------------
 
@@ -166,6 +173,11 @@ instance Monad (Parser s) where
             r1 <- doParse text
             runParser (f . fst $ r1) $ snd r1) pl
 
+failed :: (Show s) => String -> String -> Parser s a 
+failed message label = Parser (\inputState ->   let (mToken, remInput) = nextToken inputState
+                                                in Failure (label, message, toParserPos remInput)
+    ) label
+
 runParser :: Parser s a -> InputState s -> Result (a, InputState s)
 runParser (Parser doParse pl) inputState = doParse inputState
 
@@ -292,6 +304,7 @@ lookupSymbol (x:xs) sym
 bindST :: SymbolTable a -> String -> a -> SymbolTable a
 bindST st s x = st ++ [(s, x)]
 
+
 -- AST model -- 
 
 
@@ -318,22 +331,73 @@ data Expression =   ExpFunctionContext FunctionContext |
 
                     deriving Show
 
+-- ExecutionLog monad --
+
+data ExecutionLog a = ExecutionLog { logs :: [String], result :: a }
+
+instance Functor ExecutionLog where
+    fmap f (ExecutionLog ls r) = ExecutionLog ls (f r)
+
+instance Applicative ExecutionLog where 
+    pure x = ExecutionLog [] x
+    el1 <*> el2 = ExecutionLog ((logs el2) ++ (logs el1)) ((result el1) (result el2))
+
+instance Monad ExecutionLog where
+    return = pure
+    ExecutionLog ls r >>= f =   
+        let nel = f r
+        in  ExecutionLog ((logs nel) ++ ls) (result nel)
+
+instance (Show a) => Show (ExecutionLog a) where
+    show (ExecutionLog ls r) = logLines ls ++ "\n\n" ++ (show r) where
+        logLines [] = ""
+        logLines (x:xs) = (logLines xs) ++ "\n" ++ x
+
+appendLog :: ExecutionLog a -> String -> ExecutionLog a
+appendLog (ExecutionLog ls r) newLog = ExecutionLog (newLog:ls) r
+( %% ) = appendLog
+( %%. ) = appendLog
+
+prependLog :: ExecutionLog a -> String -> ExecutionLog a
+prependLog (ExecutionLog ls r) newLog = ExecutionLog (ls ++ [newLog]) r
+( .%% ) = prependLog
+
+appendContextLog :: ExecutionLog (Either String a) -> (a -> String) -> ExecutionLog (Either String a)
+appendContextLog (ExecutionLog ls (Right r)) f = ExecutionLog ls (Right r) %%. (f r)
+appendContextLog el f = el
+( >%% ) = appendContextLog
+( >%%. ) = appendContextLog
+
+prependContextLog :: ExecutionLog (Either String a) -> (a -> String) -> ExecutionLog (Either String a)
+prependContextLog (ExecutionLog ls (Right r)) f = ExecutionLog ls (Right r) .%% (f r)
+prependContextLog el f = el
+( >.%% ) = prependContextLog
+
 -- evaluate AST --
 
 class Solvable a where
-    solve :: SymbolTable Expression -> a -> Either String Integer
+    solve :: SymbolTable Expression -> a -> ExecutionLog (Either String Integer)
+
+invert :: Either String (ExecutionLog (Either String a)) -> ExecutionLog (Either String a)
+invert (Left msg) = pure . Left $ msg
+invert (Right (ExecutionLog ls er)) = ExecutionLog ls er
+
 
 instance Solvable Constant where
-    solve st (Constant x) = Right x
+    solve st (Constant x) = (pure . Right $ x) %% ("Found " ++ show x)
+
 
 instance Solvable BoundVar where
-    solve st (BoundVar symbol) = maybeToEither errMessage (lookupSymbol st symbol) >>= solve st where
+    solve st (BoundVar symbol) = invert result .%% ("Looking for value " ++ symbol) where
         errMessage = "Symbol " ++ symbol ++ " not found"
+        result = do
+            exp <- maybeToEither errMessage (lookupSymbol st symbol)
+            pure (solve st exp %% ("Bound result to " ++ symbol))
+
 
 instance Solvable FunctionCall where
-    solve st (FunctionCall funcSymbol argStack) = maybeToEither errMessage (lookupSymbol st funcSymbol) >>= ncompute where
-        errMessage = "Function " ++ funcSymbol ++ " not found"
-        ncompute :: Expression -> Either String Integer
+    solve st (FunctionCall funcSymbol argStack) = invert result .%% ("Calling func bound to " ++ funcSymbol) where
+        ncompute :: Expression -> ExecutionLog (Either String Integer)
         ncompute (ExpFunctionContext (FunctionContext ss nst exp)) = solve (bindArgs argStack ss) exp where
                 bindArgs :: Stack Expression -> Stack String -> SymbolTable Expression
                 bindArgs argStack symStack = mGetOrElse (do
@@ -343,29 +407,47 @@ instance Solvable FunctionCall where
                         newArgStack = snd . pop $ argStack
                         newSymStack = snd . pop $ symStack
                         recursedST = bindArgs newArgStack newSymStack
-        ncompute exp = Left $ "Illegal invocation of non-function expression as a function\nSymbol: " ++ funcSymbol
-        
+        ncompute exp = pure (Left $ "Illegal invocation of non-function expression as a function\nSymbol: " ++ funcSymbol)
+    
+        errMessage = "Function " ++ funcSymbol ++ " not found"
+
+        result = do
+            exp <- maybeToEither errMessage (lookupSymbol st funcSymbol)
+            pure (ncompute exp)
+
+
 instance Solvable MathOp where
     solve st (MNode Add x y) = do 
-        a <- (solve st x)
-        b <- (solve st y)
-        Right $ a + b
+        e1 <- (solve st x)
+        e2 <- (solve st y)
+        return (pure (+) <*> e1 <*> e2) >%%. (\r -> "Adding, got " ++ show r)
+
     solve st (MNode Sub x y) = do 
-        a <- (solve st x)
-        b <- (solve st y)
-        Right $ a - b
+        e1 <- (solve st x)
+        e2 <- (solve st y)
+        return (pure (-) <*> e1 <*> e2) >%%. (\r -> "Subtracting, got " ++ show r)
+
     solve st (MNode Mul x y) = do 
-        a <- (solve st x)
-        b <- (solve st y)
-        Right $ a * b
+        e1 <- (solve st x)
+        e2 <- (solve st y)
+        return (pure (*) <*> e1 <*> e2) >%%. (\r -> "Mutiplying, got " ++ show r)
+
 
 instance Solvable FunctionContext where
     solve st (FunctionContext ss nst exp) = solve (st ++ nst) exp
 
+
 instance Solvable IfStatement where
     solve st (IfStatement cond trueExp falseExp) = do
-        condResult <- solve st cond
-        if (condResult > 0) then solve st trueExp else solve st falseExp
+        elCond <- solve st cond >%%. (\r -> "Evaluated condition to " ++ show r ++ " -> " ++ show (sb r))
+        if (seb elCond) then (solve st trueExp) else (solve st falseExp) where
+            sb :: Integer -> Bool
+            sb n = n > 0
+
+            seb :: Either String Integer -> Bool
+            seb (Left msg) = False
+            seb (Right n) = sb n
+
 
 instance Solvable Expression where
     solve st (ExpMathOp exp) = solve st exp
@@ -390,6 +472,9 @@ parseMathExp =  let mathOp = fmap doMathOpp $ anyOf "+-*" .>>. (w >>. pBrackets 
                     doMathOpp (('*', ls), rs) = ExpMathOp (MNode Mul ls rs)
                     doFuncOpp (symbol, argList) = ExpFunctionCall . FunctionCall symbol . Stack $ argList
 
+parseConstant :: Parser Char Constant
+parseConstant = fmap Constant pint
+
 parseFuncDecleration :: Parser Char FunctionContext
 parseFuncDecleration = fmap toFuncExp $ pchar '|' >>. (pword .>> pchar '.') .>>. pBrackets openExp where
     toFuncExp :: (String, Expression) -> FunctionContext
@@ -397,29 +482,38 @@ parseFuncDecleration = fmap toFuncExp $ pchar '|' >>. (pword .>> pchar '.') .>>.
     toFuncExp (var, exp) = FunctionContext (Stack [var]) [] (exp)
     
 
-parseFuncCall :: Parser Char FunctionContext
-parseFuncCall = fmap f $ parseFuncDecleration .>>. (many (w >>. pBrackets openExp)) where
-    f :: (FunctionContext, [Expression]) -> FunctionContext
-    f (funcContext, ([])) = funcContext
-    f ((FunctionContext ss st exp), (x:xs)) = 
-        let rest = f (FunctionContext poppedStack st exp, xs)
-            poppedStack = snd . pop $ ss
-            ans = do
-                value <- fst . pop $ ss
-                return $ FunctionContext (symbolStack rest) (bindST (symbolTable rest) value x) exp
-        in  mGetOrElse (ans) (FunctionContext newStack st exp) 
-
 parseIfStatement :: Parser Char IfStatement
 parseIfStatement = fmap toIf $ pseq "if" >>. oe .>>. (pseq "then" >>. oe) .>>. (pseq "else" >>. oe) where
     oe = w >>. pBrackets openExp .>> w
     toIf ((condExp, trueExp), falseExp) = IfStatement condExp trueExp falseExp
 
-openExp :: Parser Char Expression
-openExp = (fmap ExpIfStatement parseIfStatement <|> fmap ExpFunctionContext parseFuncCall <|> parseMathExp) <%> "Expression"
+parseFuncApply :: Parser Char Expression
+parseFuncApply = pBrackets openExp
 
-debug :: Parser Char (Either String Integer)
-debug = fmap (solve []) (w >>. openExp)
--- debug :: Parser Char Expression
--- debug = openExp
+singleTerm :: Parser Char Expression
+singleTerm = (constant <|> ifStatement <|> funcDecleration <|> mathOp) <%> "Single Term" where
+    constant = fmap ExpConst parseConstant
+    ifStatement = fmap ExpIfStatement parseIfStatement
+    funcDecleration = fmap ExpFunctionContext parseFuncDecleration
+    mathOp = parseMathExp
+
+applyExpression :: FunctionContext -> Expression -> Parser Char Expression
+applyExpression (FunctionContext ss st exp) value = 
+    let newStack = snd . pop $ ss
+        mExpFuncContext = do
+            sym <- fst . pop $ ss
+            return . pure . ExpFunctionContext $ FunctionContext newStack (bindST st sym value) exp
+    in mGetOrElse mExpFuncContext (failed "Too many function applications" "StackPop")
+
+openExp :: Parser Char Expression
+openExp = ((singleTerm .>>. many (w >>. parseFuncApply)) >>= flatten) <%> "Open Expression" where
+    flatten :: (Expression, [Expression]) -> Parser Char Expression
+    flatten (base, stack) = foldl (\p e1 -> p >>= reduce e1) (pure base) stack
+
+    reduce :: Expression -> Expression -> Parser Char Expression
+    reduce exp (ExpFunctionContext funcContext) = applyExpression funcContext exp
+    reduce e1 e2 = failed "Function application on non-function" "StackPop"
+
+
 
 
