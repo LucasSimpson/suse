@@ -1,6 +1,7 @@
 import Data.Bifunctor
 import Data.Maybe
 import Data.Either
+import Control.Monad
 
 import System.IO  
   
@@ -16,9 +17,9 @@ main = do
         pullInfo (Result (exp, s)) = show exp 
         pullInfo (failure) = show failure 
         parsed = w >>. openExp
-        solved = fmap (solve []) parsed
+        solved = fmap (solve (newScope [])) parsed
 
-        execute (Result (exp, s)) = show . solve [] $ exp
+        execute (Result (exp, s)) = show . solve (newScope []) $ exp
         execute (failure) = show failure
 
 -------------------- generic helper dat / funcs --------------------
@@ -26,6 +27,10 @@ main = do
 maybeToEither :: String -> Maybe a -> Either String a
 maybeToEither _ (Just x) = Right x
 maybeToEither errMessage (Nothing) = Left errMessage
+
+mOr :: Maybe a -> Maybe a -> Maybe a
+mOr (Just x) m2 = Just x
+mOr (Nothing) m2 = m2
 
 splitNL :: String -> [String]
 splitNL [] = []
@@ -71,6 +76,9 @@ pop (Stack (x:xs)) = (Just x, Stack xs)
 peek :: Stack a -> Maybe a
 peek (Stack []) = Nothing
 peek (Stack (x:xs)) = Just x
+
+sizeOf :: Stack a -> Int
+sizeOf (Stack s) = length s
 
 p1 :: (a, b, c) -> a
 p1 (x, y, z) = x
@@ -272,7 +280,7 @@ assertParser message (Parser func l) = Parser (\text ->
 
 
 pword :: Parser Char String
-pword = many1 . anyOf $ "abcdefghijklmnopqrstuvwxyz"
+pword = many1 . anyOf $ "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 pint :: Parser Char Integer
 pint = fmap (read . combine) ((opt . pchar $ '-') .>>. (many1 . anyOf $ "0123456789")) <%> "Integer" where
@@ -286,6 +294,8 @@ w = many (pchar ' ' <|> pchar '\t' <|> pchar '\n')
 pBrackets :: Parser Char a -> Parser Char a
 pBrackets parser = pchar '(' >> w >>. parser .>> (w >> (pchar ')'))
 
+pCurlyBrackets :: Parser Char a -> Parser Char a
+pCurlyBrackets parser = pchar '{' >> w >>. parser .>> (w >> (pchar '}'))
 
 -------------------- Custom Interpreter Stuff using Parsers --------------------
 
@@ -295,215 +305,305 @@ type Symbol = String
 type SymbolList = [String]
 type SymbolTable a = [(Symbol, a)]
 
-lookupSymbol :: SymbolTable a -> Symbol -> Maybe a
-lookupSymbol [] sym = Nothing
-lookupSymbol (x:xs) sym
+stLookup :: Symbol -> SymbolTable a -> Maybe a
+stLookup sym [] = Nothing
+stLookup sym (x:xs)
     | fst x == sym = Just $ snd x
-    | otherwise = lookupSymbol xs sym
+    | otherwise = stLookup sym xs
 
-bindST :: SymbolTable a -> String -> a -> SymbolTable a
-bindST st s x = st ++ [(s, x)]
+stBind :: SymbolTable a -> String -> a -> SymbolTable a
+stBind st s x = st ++ [(s, x)]
 
+data Scope a = Scope {
+        symbolTable :: SymbolTable a,
+        parent :: Maybe (Scope a)
+    }
+
+instance (Show a) => Show (Scope a) where 
+    show scope = "Some Scope"
+    -- show (Scope st mParent) = mGetOrElse (fmap f mParent) (showSt st) where
+    --     f pScope = showSt st ++ "\n" ++ show pScope
+
+    --     showSt [] = ""
+    --     showSt (p:xs) = (show . fst $ p) ++ " -> " ++ (show . snd $ p) ++ "\n" ++ showSt xs
+
+newScope :: SymbolTable a -> Scope a
+newScope st = Scope st Nothing
+
+setParent :: Scope a -> Scope a -> Scope a
+setParent parent child = Scope (symbolTable child) (Just parent) 
+
+lookupSymbol :: Symbol -> Scope a -> Maybe a
+lookupSymbol sym (Scope st parent) = mOr (stLookup sym st) (parent >>= lookupSymbol sym) 
+
+bindToScope :: Scope a -> Symbol -> a -> Scope a
+bindToScope (Scope st parent) sym value = Scope (stBind st sym value) parent
 
 -- AST model -- 
 
-
-data MathOpType = Add | Sub | Mul deriving Show
-data MathOp = MNode MathOpType Expression Expression deriving Show
-
 data Constant = Constant Integer deriving Show
-data BoundVar = BoundVar Symbol deriving Show
-data FunctionCall = FunctionCall Symbol (Stack Expression) deriving Show
+data BoolLiteral = BoolLiteral Bool deriving Show
 data FunctionContext = FunctionContext {
+        funcName :: Symbol,
         symbolStack :: Stack String,
-        symbolTable :: SymbolTable Expression,
-        expression :: Expression
+        scope :: Scope Expression,
+        funcExpression :: Expression
+    } deriving Show
+
+data BuiltInFunc = BuiltInFunc {
+        name :: String,
+        func :: Scope Expression -> Executer ComputationResult
+    }
+
+data ExpressionLookup = ExpressionLookup String deriving Show
+data FunctionApplication = FunctionApplication { 
+        previousExpression :: Expression,
+        argument :: Expression  
     } deriving Show
 
 data IfStatement = IfStatement Expression Expression Expression deriving Show
 
-data Expression =   ExpFunctionContext FunctionContext | 
-                    ExpMathOp MathOp | 
+data Expression =   ExpFunctionContext FunctionContext |  
                     ExpConst Constant |
-                    ExpBoundVar BoundVar |
-                    ExpFunctionCall FunctionCall |
-                    ExpIfStatement IfStatement
+                    ExpBoolLiteral BoolLiteral |
+                    ExpIfStatement IfStatement |
+                    ExpFunctionApplication FunctionApplication |
+                    ExpExpressionLookup ExpressionLookup |
+                    ExpBuiltInFunc BuiltInFunc
 
-                    deriving Show
+instance Show BuiltInFunc where
+    show (BuiltInFunc name f) = "BuiltIn(" ++ show name ++ ")"
 
--- ExecutionLog monad --
+instance Show Expression where
+    show (ExpFunctionContext fc) = show fc
+    show (ExpConst const) = show const
+    show (ExpFunctionApplication fa) = show fa
+    show (ExpExpressionLookup el) = show el
+    show (ExpBuiltInFunc bif) = show bif
+    show (ExpIfStatement ie) = show ie
+    show (ExpBoolLiteral bl) = show bl
 
-data ExecutionLog a = ExecutionLog { logs :: [String], result :: a }
+-- runtime monad --
 
-instance Functor ExecutionLog where
-    fmap f (ExecutionLog ls r) = ExecutionLog ls (f r)
+data Executer a = Executer { logLines :: [String], solvedResult :: Either String a }
 
-instance Applicative ExecutionLog where 
-    pure x = ExecutionLog [] x
-    el1 <*> el2 = ExecutionLog ((logs el2) ++ (logs el1)) ((result el1) (result el2))
+instance Functor Executer where
+    fmap f (Executer logs result) = Executer logs $ fmap f result
 
-instance Monad ExecutionLog where
+instance Applicative Executer where
+    pure x = Executer [] $ pure x
+    (Executer l1 r1) <*> (Executer l2 r2) = Executer (l2 ++ l1) (r1 <*> r2)
+
+instance Monad Executer where
     return = pure
-    ExecutionLog ls r >>= f =   
-        let nel = f r
-        in  ExecutionLog ((logs nel) ++ ls) (result nel)
+    executer >>= f = infCheck $ doBind (infCheck executer) f where
 
-instance (Show a) => Show (ExecutionLog a) where
-    show (ExecutionLog ls r) = logLines ls ++ "\n\n" ++ (show r) where
-        logLines [] = ""
-        logLines (x:xs) = (logLines xs) ++ "\n" ++ x
+            infCheck :: Executer a -> Executer a
+            infCheck (Executer logs r) = if (length logs <= 1000) then (
+                    Executer logs r
+                ) else (Executer logs $ Left "Stopped automatically after too many log lines")
 
-appendLog :: ExecutionLog a -> String -> ExecutionLog a
-appendLog (ExecutionLog ls r) newLog = ExecutionLog (newLog:ls) r
+            doBind :: Executer a -> (a -> Executer b) -> Executer b
+            doBind (Executer logs (Left msg)) f = Executer logs (Left msg)
+            doBind (Executer logs (Right x)) f = 
+                let newExecuter = f x
+                in  Executer ((logLines newExecuter) ++ logs) (solvedResult newExecuter)
+
+
+instance (Show a) => Show (Executer a) where
+    show (Executer logs r) = showLogs logs ++ "\n\n" ++ (show r) where
+        showLogs [] = ""
+        showLogs (x:xs) = (showLogs xs) ++ "\n" ++ x
+
+pureFlop :: String -> Executer a
+pureFlop msg = Executer [] $ Left msg
+
+appendLog :: Executer a -> String -> Executer a
+appendLog (Executer logs r) newLog = Executer (newLog:logs) r
 ( %% ) = appendLog
 ( %%. ) = appendLog
 
-prependLog :: ExecutionLog a -> String -> ExecutionLog a
-prependLog (ExecutionLog ls r) newLog = ExecutionLog (ls ++ [newLog]) r
+prependLog :: Executer a -> String -> Executer a
+prependLog (Executer logs r) newLog = Executer (logs ++ [newLog]) r
 ( .%% ) = prependLog
 
-appendContextLog :: ExecutionLog (Either String a) -> (a -> String) -> ExecutionLog (Either String a)
-appendContextLog (ExecutionLog ls (Right r)) f = ExecutionLog ls (Right r) %%. (f r)
+appendContextLog :: Executer a -> (a -> String) -> Executer a
+appendContextLog (Executer logs (Right r)) f = Executer logs (Right r) %%. (f r)
 appendContextLog el f = el
 ( >%% ) = appendContextLog
 ( >%%. ) = appendContextLog
 
-prependContextLog :: ExecutionLog (Either String a) -> (a -> String) -> ExecutionLog (Either String a)
-prependContextLog (ExecutionLog ls (Right r)) f = ExecutionLog ls (Right r) .%% (f r)
+prependContextLog :: Executer a -> (a -> String) -> Executer a
+prependContextLog (Executer logs (Right r)) f = Executer logs (Right r) .%% (f r)
 prependContextLog el f = el
 ( >.%% ) = prependContextLog
 
 -- evaluate AST --
 
-class Solvable a where
-    solve :: SymbolTable Expression -> a -> ExecutionLog (Either String Integer)
+data ComputationResult =    TInt Integer | 
+                            FC FunctionContext |
+                            TBool Bool
 
-invert :: Either String (ExecutionLog (Either String a)) -> ExecutionLog (Either String a)
-invert (Left msg) = pure . Left $ msg
-invert (Right (ExecutionLog ls er)) = ExecutionLog ls er
+                            deriving Show
+
+class Solvable a where
+    solve :: Scope Expression -> a -> Executer ComputationResult
+    logShow :: a -> String
 
 
 instance Solvable Constant where
-    solve st (Constant x) = (pure . Right $ x) %% ("Found " ++ show x)
+    solve scope (Constant x) = (pure . TInt $ x) %% ("Found " ++ show x)
+    logShow (Constant x) = show x
 
-
-instance Solvable BoundVar where
-    solve st (BoundVar symbol) = invert result .%% ("Looking for value " ++ symbol) where
-        errMessage = "Symbol " ++ symbol ++ " not found"
-        result = do
-            exp <- maybeToEither errMessage (lookupSymbol st symbol)
-            pure (solve st exp %% ("Bound result to " ++ symbol))
-
-
-instance Solvable FunctionCall where
-    solve st (FunctionCall funcSymbol argStack) = invert result .%% ("Calling func bound to " ++ funcSymbol) where
-        ncompute :: Expression -> ExecutionLog (Either String Integer)
-        ncompute (ExpFunctionContext (FunctionContext ss nst exp)) = solve (bindArgs argStack ss) exp where
-                bindArgs :: Stack Expression -> Stack String -> SymbolTable Expression
-                bindArgs argStack symStack = mGetOrElse (do
-                    argMExp <- peek argStack
-                    boundVar <- peek symStack
-                    Just $ bindST (recursedST) boundVar argMExp) (st ++ nst) where
-                        newArgStack = snd . pop $ argStack
-                        newSymStack = snd . pop $ symStack
-                        recursedST = bindArgs newArgStack newSymStack
-        ncompute exp = pure (Left $ "Illegal invocation of non-function expression as a function\nSymbol: " ++ funcSymbol)
-    
-        errMessage = "Function " ++ funcSymbol ++ " not found"
-
-        result = do
-            exp <- maybeToEither errMessage (lookupSymbol st funcSymbol)
-            pure (ncompute exp)
-
-
-instance Solvable MathOp where
-    solve st (MNode Add x y) = do 
-        e1 <- (solve st x)
-        e2 <- (solve st y)
-        return (pure (+) <*> e1 <*> e2) >%%. (\r -> "Adding, got " ++ show r)
-
-    solve st (MNode Sub x y) = do 
-        e1 <- (solve st x)
-        e2 <- (solve st y)
-        return (pure (-) <*> e1 <*> e2) >%%. (\r -> "Subtracting, got " ++ show r)
-
-    solve st (MNode Mul x y) = do 
-        e1 <- (solve st x)
-        e2 <- (solve st y)
-        return (pure (*) <*> e1 <*> e2) >%%. (\r -> "Mutiplying, got " ++ show r)
-
+instance Solvable BoolLiteral where
+    solve scope (BoolLiteral x) = (pure . TBool $ x) %% ("Found " ++ show x)
+    logShow (BoolLiteral x) = show x
 
 instance Solvable FunctionContext where
-    solve st (FunctionContext ss nst exp) = solve (st ++ nst) exp
+    solve pScope (FunctionContext name ss cScope exp) = pure . FC $ toSolve where
+        combinedScope = setParent pScope cScope
+        -- self = FunctionContext name ss combinedScope exp
+        -- recursedScope = bindToScope combinedScope name (ExpFunctionContext self)
+        -- toSolve = FunctionContext name ss recursedScope exp
+        toSolve = FunctionContext name ss combinedScope exp
+
+    logShow (FunctionContext name ss cScope exp) = "(FuncContext for " ++ show name ++ ")"
+
+runFunctionContext :: FunctionContext -> Executer ComputationResult
+runFunctionContext (FunctionContext name ss pScope exp) = solve pScope exp .%% ("Fully applied, runing func with scope \n ******* SCOPE ******* \n" ++ show pScope ++ "\n ******* /SCOPE ******* \n") where
+    -- self = FunctionContext name ss pScope exp
+    -- newScope = bindToScope pScope name (ExpFunctionContext self)
+-- runFunctionContext (FunctionContext name ss pScope exp) = solve pScope exp 
 
 
 instance Solvable IfStatement where
-    solve st (IfStatement cond trueExp falseExp) = do
-        elCond <- solve st cond >%%. (\r -> "Evaluated condition to " ++ show r ++ " -> " ++ show (sb r))
-        if (seb elCond) then (solve st trueExp) else (solve st falseExp) where
-            sb :: Integer -> Bool
-            sb n = n > 0
+    solve pScope (IfStatement cond trueExp falseExp) = do
+        condResult <- solve pScope cond
+        bool <- onlyTBool condResult >%%. (\r -> "Evaluated condition to " ++ show r)
+        if bool then (solve pScope trueExp) else (solve pScope falseExp)
 
-            seb :: Either String Integer -> Bool
-            seb (Left msg) = False
-            seb (Right n) = sb n
+    logShow ifStatement = "[IfStatement]"
 
+
+instance Solvable FunctionApplication where
+    solve pScope (FunctionApplication prevExp arg) = (solve pScope prevExp) >>= applyCR arg >>= callFunc where
+
+        callFunc :: ComputationResult -> Executer ComputationResult
+        callFunc (FC (FunctionContext name ss cScope exp)) = if (sizeOf ss == 0) then (
+                -- runFunctionContext . FunctionContext name ss cScope $ exp
+                runFunctionContext . FunctionContext name ss (setParent cScope pScope) $ exp
+            ) else (
+                pure . FC . FunctionContext name ss cScope $ exp
+                -- pure . FC . FunctionContext name ss (setParent cScope pScope) $ exp
+            )
+
+        applyCR :: Expression -> ComputationResult -> Executer ComputationResult
+        applyCR argExp (FC (FunctionContext name ss cScope funcExp)) = 
+            let newStack = snd . pop $ ss
+                mExpFuncContext = do
+                    sym <- fst . pop $ ss
+                    newFc <- pure $ FunctionContext name newStack (bindToScope cScope sym argExp) funcExp
+                    return ((pure . FC $ newFc) %%. ("Binding " ++ (logShow argExp) ++ " to " ++ (logShow newFc)))
+            in mGetOrElse mExpFuncContext (pureFlop "Runtime Exception: To many arguments.")
+
+        applyCR argExp cr = pureFlop $ "Runtime Exception: Tried to call non-function " ++ show cr
+        
+    logShow funcApp = "[FunctionApplication]"
+
+
+crForBuiltIn :: Scope Expression -> BuiltInFunc -> Executer ComputationResult
+crForBuiltIn pScope (BuiltInFunc name func) = (pure . FC . FunctionContext name (Stack ["_1", "_2"]) pScope . ExpBuiltInFunc $ (BuiltInFunc name func)) %%. ("Built-in func " ++ show name ++ " found")
+
+instance Solvable ExpressionLookup where
+    solve pScope (ExpressionLookup symbol)
+        | symbol == "+" = crForBuiltIn pScope builtInAdd
+        | symbol == "-" = crForBuiltIn pScope builtInSub
+        | symbol == "*" = crForBuiltIn pScope builtInMult
+        | symbol == "==" = crForBuiltIn pScope builtInEq
+        | symbol == ">" = crForBuiltIn pScope builtInGT
+        | symbol == "<" = crForBuiltIn pScope builtInLT
+        | symbol == "and" = crForBuiltIn pScope builtInAnd
+        | symbol == "or" = crForBuiltIn pScope builtInOr
+        | otherwise = mGetOrElse (
+                do
+                    exp <- lookupSymbol symbol pScope
+                    pure (solve pScope exp %% ("Binding " ++ logShow exp ++ " to " ++ symbol))
+            ) (
+                pureFlop $ "Symbol " ++ symbol ++ " not found"
+            ) .%% ("Looking for " ++ symbol ++ " with scope\n ***** LOOKUP SCOPE *****\n" ++ show pScope ++ " ***** /LOOKUP SCOPE *****\n")
+
+    logShow (ExpressionLookup sym) = "ExpLookup(" ++ show sym ++ ")"
+
+instance Solvable BuiltInFunc where
+    solve pScope (BuiltInFunc name func) = (func pScope) .%% ("Running built-in func " ++ show name)
+    logShow (BuiltInFunc name f) = "BF(" ++ show name ++ ")"
 
 instance Solvable Expression where
-    solve st (ExpMathOp exp) = solve st exp
-    solve st (ExpFunctionContext exp) = solve st exp
-    solve st (ExpConst exp) = solve st exp
-    solve st (ExpBoundVar exp) = solve st exp
-    solve st (ExpFunctionCall exp) = solve st exp
-    solve st (ExpIfStatement exp) = solve st exp
+    solve pScope (ExpFunctionContext exp) = (pure exp >>= solve pScope) .%% "Solving FunctionContext"
+    solve pScope (ExpConst exp) = (pure exp >>= solve pScope) .%% "Solving Constant"
+    solve pScope (ExpIfStatement exp) = (pure exp >>= solve pScope) .%% "Solving IfStatement"
+    solve pScope (ExpFunctionApplication exp) = (pure exp >>= solve pScope) .%% "Solving FunctionApplication"
+    solve pScope (ExpExpressionLookup exp) = (pure exp >>= solve pScope) .%% "Solving ExpressionLookup"
+    solve pScope (ExpBuiltInFunc exp) = (pure exp >>= solve pScope) .%% "Solving BuiltInFunc"
+    solve pScope (ExpBoolLiteral exp) = (pure exp >>= solve pScope) .%% "Solving BoolLiteral"
 
+    logShow (ExpFunctionContext exp) = logShow exp
+    logShow (ExpConst exp) = logShow exp
+    logShow (ExpBoolLiteral exp) = logShow exp
+    logShow (ExpIfStatement exp) = logShow exp
+    logShow (ExpFunctionApplication exp) = logShow exp
+    logShow (ExpExpressionLookup exp) = logShow exp
+    logShow (ExpBuiltInFunc exp) = logShow exp
 
 -- parse text to AST --
-
-parseMathExp :: Parser Char Expression
-parseMathExp =  let mathOp = fmap doMathOpp $ anyOf "+-*" .>>. (w >>. pBrackets openExp) .>>. (w >>. pBrackets openExp)
-                    funcCall = fmap doFuncOpp $ pchar '!' >>. pword .>>. (many (w >>. pBrackets openExp))
-                    constant = fmap (ExpConst . Constant) pint
-                    variable = fmap (ExpBoundVar . BoundVar) pword
-                    term = constant <|> funcCall <|> variable <|> mathOp 
-                in  (pBrackets term <|> term) <%> "Math Expression" where
-                    doMathOpp (('+', ls), rs) = ExpMathOp (MNode Add ls rs)
-                    doMathOpp (('-', ls), rs) = ExpMathOp (MNode Sub ls rs)
-                    doMathOpp (('*', ls), rs) = ExpMathOp (MNode Mul ls rs)
-                    doFuncOpp (symbol, argList) = ExpFunctionCall . FunctionCall symbol . Stack $ argList
 
 parseConstant :: Parser Char Constant
 parseConstant = fmap Constant pint
 
-parseFuncDecleration :: Parser Char FunctionContext
-parseFuncDecleration = fmap toFuncExp $ pchar '|' >>. (pword .>> pchar '.') .>>. pBrackets openExp where
-    toFuncExp :: (String, Expression) -> FunctionContext
-    toFuncExp (var, (ExpFunctionContext (FunctionContext symStack st exp))) = FunctionContext (push var symStack) st exp
-    toFuncExp (var, exp) = FunctionContext (Stack [var]) [] (exp)
-    
+parseBool :: Parser Char BoolLiteral
+parseBool = fmap toBool (pseq "True" <|> pseq "False") where
+    toBool str
+        | str == "True" = BoolLiteral True
+        | otherwise     = BoolLiteral False
 
+parseFuncDecleration :: Parser Char FunctionContext
+parseFuncDecleration = fmap toFuncExp $ pchar '|' >>. pword .>>. pBrackets pword .>>. (w >>. pCurlyBrackets openExp) where
+    toFuncExp :: ((String, String), Expression) -> FunctionContext
+    toFuncExp ((name, var), exp) = self where
+        scope = bindToScope (newScope []) name (ExpFunctionContext self)
+        self = FunctionContext name (Stack [var]) (scope) exp
+    
 parseIfStatement :: Parser Char IfStatement
 parseIfStatement = fmap toIf $ pseq "if" >>. oe .>>. (pseq "then" >>. oe) .>>. (pseq "else" >>. oe) where
     oe = w >>. pBrackets openExp .>> w
     toIf ((condExp, trueExp), falseExp) = IfStatement condExp trueExp falseExp
 
-parseFuncApply :: Parser Char Expression
-parseFuncApply = pBrackets openExp
+parseExpressionLookup :: Parser Char ExpressionLookup
+parseExpressionLookup = fmap ExpressionLookup (boolOpp <|> mathOpp <|> variable) where
+    variable = pword
+    mathOpp = fmap (:"") . anyOf $ "+-*"
+    boolOpp = pseq "==" <|> pseq "and" <|> pseq "or" <|> (fmap (:"") . anyOf $ "<>")
+
 
 singleTerm :: Parser Char Expression
-singleTerm = (constant <|> ifStatement <|> funcDecleration <|> mathOp) <%> "Single Term" where
+singleTerm = (constant <|> bool <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
     constant = fmap ExpConst parseConstant
+    bool = fmap ExpBoolLiteral parseBool
     ifStatement = fmap ExpIfStatement parseIfStatement
     funcDecleration = fmap ExpFunctionContext parseFuncDecleration
-    mathOp = parseMathExp
+    expLookup = fmap ExpExpressionLookup parseExpressionLookup
+
 
 applyExpression :: FunctionContext -> Expression -> Parser Char Expression
-applyExpression (FunctionContext ss st exp) value = 
+applyExpression (FunctionContext name ss pScope exp) value = 
     let newStack = snd . pop $ ss
         mExpFuncContext = do
             sym <- fst . pop $ ss
-            return . pure . ExpFunctionContext $ FunctionContext newStack (bindST st sym value) exp
+            return . pure . ExpFunctionContext $ FunctionContext name newStack (bindToScope pScope sym value) exp
     in mGetOrElse mExpFuncContext (failed "Too many function applications" "StackPop")
+
+parseFuncApply :: Parser Char Expression
+parseFuncApply = pBrackets openExp
 
 openExp :: Parser Char Expression
 openExp = ((singleTerm .>>. many (w >>. parseFuncApply)) >>= flatten) <%> "Open Expression" where
@@ -511,9 +611,97 @@ openExp = ((singleTerm .>>. many (w >>. parseFuncApply)) >>= flatten) <%> "Open 
     flatten (base, stack) = foldl (\p e1 -> p >>= reduce e1) (pure base) stack
 
     reduce :: Expression -> Expression -> Parser Char Expression
-    reduce exp (ExpFunctionContext funcContext) = applyExpression funcContext exp
-    reduce e1 e2 = failed "Function application on non-function" "StackPop"
+    reduce e1 e2 = pure . ExpFunctionApplication . FunctionApplication e2 $ e1
+
+-- built in functions / stdlib --
+
+onlyTInt :: ComputationResult -> Executer Integer
+onlyTInt (TInt x) = pure x
+onlyTInt other = pureFlop $ "Runtime Exception: Expected Int, got " ++ show other
+
+onlyTBool :: ComputationResult -> Executer Bool
+onlyTBool (TBool x) = pure x
+onlyTBool other = pureFlop $ "Runtime Exception: Expected Bool, got " ++ show other
+
+onlyFC :: ComputationResult -> Executer FunctionContext
+onlyFC (FC x) = pure x
+onlyFC other = pureFlop $ "Runtime Exception: Expected FunctionContext, got " ++ show other
 
 
+twoArgBuiltInFunc :: String -> (ComputationResult -> ComputationResult -> Executer ComputationResult) -> BuiltInFunc
+twoArgBuiltInFunc name doOpp = BuiltInFunc name f where
+    f :: Scope Expression -> Executer ComputationResult
+    f pScope = mGetOrElse (do
+        arg1 <- lookupSymbol "_1" pScope
+        arg2 <- lookupSymbol "_2" pScope 
+        pure (
+                do
+                    r1 <- solve pScope arg1
+                    r2 <- solve pScope arg2
+                    doOpp r1 r2 
+            )
+        ) (pureFlop $ "Arg lookup failure on built-in func " ++ name) 
+
+builtInAdd :: BuiltInFunc 
+builtInAdd = twoArgBuiltInFunc "Add" doOpp where
+    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp cx cy = do
+        x <- onlyTInt cx
+        y <- onlyTInt cy
+        (pure . TInt $ (x + y)) >%%. (\r -> show x ++ " + " ++ show y ++ " = " ++ show r)
 
 
+builtInSub :: BuiltInFunc 
+builtInSub = twoArgBuiltInFunc "Sub" doOpp where
+    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp cx cy = do
+        x <- onlyTInt cx
+        y <- onlyTInt cy
+        (pure . TInt $ (x - y)) >%%. (\r -> show x ++ " - " ++ show y ++ " = " ++ show r)
+
+
+builtInMult :: BuiltInFunc 
+builtInMult = twoArgBuiltInFunc "Mult" doOpp where
+    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp cx cy = do
+        x <- onlyTInt cx
+        y <- onlyTInt cy
+        (pure . TInt $ (x * y)) >%%. (\r -> show x ++ " * " ++ show y ++ " = " ++ show r)
+
+
+builtInEq :: BuiltInFunc
+builtInEq = twoArgBuiltInFunc "Eq" doOpp where
+    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp (TBool x) (TBool y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ show r)
+    doOpp (TInt x) (TInt y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ show r)
+    doOpp x y = pureFlop $ "Cannot equate two args of different types: " ++ show x ++ " vs " ++ show y
+
+
+builtInGT :: BuiltInFunc
+builtInGT = twoArgBuiltInFunc "GT" doOpp where
+    doOpp cx cy = do
+        x <- onlyTInt cx
+        y <- onlyTInt cy
+        (pure . TBool $ (x > y)) >%%. (\r -> show x ++ " > " ++ show y ++ " -> " ++ show r)
+
+builtInLT :: BuiltInFunc
+builtInLT = twoArgBuiltInFunc "LT" doOpp where
+    doOpp cx cy = do
+        x <- onlyTInt cx
+        y <- onlyTInt cy
+        (pure . TBool $ (x < y)) >%%. (\r -> show x ++ " < " ++ show y ++ " -> " ++ show r)
+
+
+builtInAnd :: BuiltInFunc
+builtInAnd = twoArgBuiltInFunc "And" doOpp where
+    doOpp cx cy = do
+        x <- onlyTBool cx
+        y <- onlyTBool cy
+        (pure . TBool $ (x && y)) >%%. (\r -> show x ++ " && " ++ show y ++ " -> " ++ show r)
+
+builtInOr :: BuiltInFunc
+builtInOr = twoArgBuiltInFunc "Or" doOpp where
+    doOpp cx cy = do
+        x <- onlyTBool cx
+        y <- onlyTBool cy
+        (pure . TBool $ (x || y)) >%%. (\r -> show x ++ " || " ++ show y ++ " -> " ++ show r)
