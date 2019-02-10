@@ -1,16 +1,24 @@
 
+|fact(x) {
+	if (== (x) (1)) then (1) else (
+		* (x) (fact (- (x) (1)))
+	)
+} (10)
+
+
 |num(x) {
 	if (== (x) (1)) then (1) else (
-		+ (x) (num (1))
+		+ (x) (num (- (x) (1)))
 	)
-} (2)
+} (10)
 
 
-|add(x) {
-	|curry(y) {
-		- (x) (y)
-	}
-} (10) (20)
+
+|plusTwo(x) {
+	+ (x) (x)
+} (
+	if (> (200) (199)) then (10) else (99)
+)
 
 
 
@@ -26,12 +34,33 @@
 
 
 
+|add(x) {
+	|curry(y) {
+		|test(z) {
+			- (x) (- (y) (z))
+		}
+	}
+} (10) (20) (30)
+
 
 |plusTwo(x) {
-	+ (x) (x)
-} (
-	if (> (100) (199)) then (10) else (99)
-)
+	+ (x) (2)
+} (10)
+
+- (10) (* (4) (3))
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 if (> (1) (2)) then (and (True) (False)) else (or (True) (False))
