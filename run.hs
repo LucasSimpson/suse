@@ -68,12 +68,17 @@ sizeOf (Stack s) = length s
 
 -------------------- Generic Higher-Order Parser declerations --------------------
 
+pletter :: Parser Char Char
+pletter = anyOf "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+pnumber :: Parser Char Char
+pnumber = anyOf "0123456789"
 
 pword :: Parser Char String
-pword = many1 . anyOf $ "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+pword = many1 pletter
 
 pint :: Parser Char Integer
-pint = fmap (read . combine) ((opt . pchar $ '-') .>>. (many1 . anyOf $ "0123456789")) <%> "Integer" where
+pint = fmap (read . combine) ((opt . pchar $ '-') .>>. (many1 pnumber)) <%> "Integer" where
     combine t = 
         let firstChar = mGetOrElse (fst t) '0'
         in firstChar:(snd t)
@@ -128,6 +133,7 @@ bindToScope (Scope st parent) sym value = Scope (stBind st sym value) parent
 
 data Constant = Constant Integer deriving Show
 data BoolLiteral = BoolLiteral Bool deriving Show
+data CharLiteral = CharLiteral Char deriving Show
 data ListLiteral = ListLiteral [Expression] deriving Show
 
 data ListIndex = ListIndex Expression Expression deriving Show
@@ -155,6 +161,7 @@ data IfStatement = IfStatement Expression Expression Expression deriving Show
 data Expression =   ExpFunctionContext FunctionContext |  
                     ExpConst Constant |
                     ExpBoolLiteral BoolLiteral |
+                    ExpCharLiteral CharLiteral |
                     ExpListLiteral ListLiteral |
                     ExpListIndex ListIndex |
                     ExpIfStatement IfStatement |
@@ -169,6 +176,7 @@ instance Show Expression where
     show (ExpFunctionContext fc) = show fc
     show (ExpConst const) = show const
     show (ExpBoolLiteral bl) = show bl
+    show (ExpCharLiteral cl) = show cl
     show (ExpListLiteral ll) = show ll
     show (ExpListIndex li) = show li
     show (ExpFunctionApplication fa) = show fa
@@ -234,9 +242,10 @@ prependContextLog el f = el
 -- evaluate AST --
 
 data ComputationResult  =   TInt Integer | 
-                            FC FunctionContext |
                             TBool Bool |
-                            TList [ComputationResult]
+                            TChar Char |
+                            TList [ComputationResult] |
+                            FC FunctionContext
 
                             deriving Show
 
@@ -252,6 +261,10 @@ instance Solvable Constant where
 instance Solvable BoolLiteral where
     solve scope (BoolLiteral x) = (pure . TBool $ x) %% ("Found " ++ show x)
     logShow (BoolLiteral x) = show x
+
+instance Solvable CharLiteral where
+    solve scope (CharLiteral x) = (pure . TChar $ x) %% ("Found " ++ show x)
+    logShow (CharLiteral x) = show x
 
 instance Solvable ListLiteral where
     solve scope (ListLiteral listExp) = fmap TList . combineExecutors . fmap (solve scope) $ listExp where
@@ -347,6 +360,7 @@ instance Solvable Expression where
     solve pScope (ExpFunctionContext exp) = (pure exp >>= solve pScope) .%% ("Solving FunctionContext with scope " ++ show pScope)
     solve pScope (ExpConst exp) = (pure exp >>= solve pScope) .%% "Solving Constant"
     solve pScope (ExpBoolLiteral exp) = (pure exp >>= solve pScope) .%% "Solving BoolLiteral"
+    solve pScope (ExpCharLiteral exp) = (pure exp >>= solve pScope) .%% "Solving CharLiteral"
     solve pScope (ExpListLiteral exp) = (pure exp >>= solve pScope) .%% "Solving ListLiteral"
     solve pScope (ExpListIndex exp) = (pure exp >>= solve pScope) .%% "Solving ListIndex"
     solve pScope (ExpIfStatement exp) = (pure exp >>= solve pScope) .%% "Solving IfStatement"
@@ -357,6 +371,7 @@ instance Solvable Expression where
     logShow (ExpFunctionContext exp) = logShow exp
     logShow (ExpConst exp) = logShow exp
     logShow (ExpBoolLiteral exp) = logShow exp
+    logShow (ExpCharLiteral exp) = logShow exp
     logShow (ExpListLiteral exp) = logShow exp
     logShow (ExpListIndex exp) = logShow exp
     logShow (ExpIfStatement exp) = logShow exp
@@ -374,6 +389,9 @@ parseBool = fmap toBool (pseq "True" <|> pseq "False") where
     toBool str
         | str == "True" = BoolLiteral True
         | otherwise     = BoolLiteral False
+
+parseChar :: Parser Char CharLiteral
+parseChar = fmap CharLiteral $ pchar '\'' >>. (pnumber <|> pletter) .>> pchar '\'' where
 
 parseList :: Parser Char ListLiteral
 parseList = fmap toList $ pchar '[' >>. opt (p1 .>>. p2) .>> pchar ']' where
@@ -403,51 +421,26 @@ parseExpressionLookup = fmap ExpressionLookup (boolOpp <|> mathOpp <|> variable)
 
 
 singleTerm :: Parser Char Expression
-singleTerm = (constant <|> bool <|> list <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
+singleTerm = (constant <|> bool <|> char <|> list <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
     constant = fmap ExpConst parseConstant
     bool = fmap ExpBoolLiteral parseBool
+    char = fmap ExpCharLiteral parseChar
     list = fmap ExpListLiteral parseList
     ifStatement = fmap ExpIfStatement parseIfStatement
     funcDecleration = fmap ExpFunctionContext parseFuncDecleration
     expLookup = fmap ExpExpressionLookup parseExpressionLookup
 
 
-parseFuncApply :: Parser Char Expression
-parseFuncApply = pBrackets openExp
-
--- parseListIndex :: Parser Char ListIndex
--- parseListIndex = fmap toListIndex $ openExp .>> w .>> pchar '@' .>> w .>>. pBrackets openExp where
---     toListIndex (exp, indexExp) = ListIndex exp indexExp
-
-parseListIndex :: Parser Char Expression
-parseListIndex = pseq "!!" >> w >>. pBrackets openExp 
-
--- openExp' :: Parser Char Expression
--- openExp' = ((singleTerm .>>. many (w >>. parseFuncApply)) >>= flatten) <%> "Open Expression" where
---     flatten :: (Expression, [Expression]) -> Parser Char Expression
---     flatten (base, stack) = foldl (\p e1 -> p >>= reduce e1) (pure base) stack
-
---     reduce :: Expression -> Expression -> Parser Char Expression
---     reduce e1 e2 = pure . ExpFunctionApplication . FunctionApplication e2 $ e1
-
-    -- no = singleTerm >>= r2
-
-    -- r2 :: Expression -> Parser Char Expression -> Parser Char Expression
-    -- r2 exp pexp = (fmap fa parseFuncApply) <|> (fmap fb parseListIndex)
-
-    -- fa (exp1, exp2) = pure . ExpFunctionApplication . FunctionApplication exp2 $ exp1
-    -- fb (exp1, exp2) = pure . ExpListIndex . ListIndex exp2 $ exp1
-
--- pConsume :: (a -> Parser s a) -> Parser s a -> Parser s a
-
 makeFuncApplication :: Expression -> Parser Char Expression
 makeFuncApplication e1 = (w >>. parseFuncApply) >>= \e2 -> 
-    pure . ExpFunctionApplication . FunctionApplication e1 $ e2
+    pure . ExpFunctionApplication . FunctionApplication e1 $ e2 where
+        parseFuncApply = pBrackets openExp
 
 
 makeListIndex :: Expression -> Parser Char Expression
 makeListIndex e1 = (w >>. parseListIndex) >>= \e2 -> 
-    pure . ExpListIndex . ListIndex e1 $ e2
+    pure . ExpListIndex . ListIndex e1 $ e2 where
+        parseListIndex = pseq "!!" >> w >>. pBrackets openExp 
 
 
 openExp :: Parser Char Expression
@@ -464,6 +457,10 @@ onlyTInt other = pureFlop $ "Runtime Exception: Expected Int, got " ++ show othe
 onlyTBool :: ComputationResult -> Executer Bool
 onlyTBool (TBool x) = pure x
 onlyTBool other = pureFlop $ "Runtime Exception: Expected Bool, got " ++ show other
+
+onlyTChar :: ComputationResult -> Executer Char
+onlyTChar (TChar x) = pure x
+onlyTChar other = pureFlop $ "Runtime Exception: Expected Char, got " ++ show other
 
 onlyFC :: ComputationResult -> Executer FunctionContext
 onlyFC (FC x) = pure x
