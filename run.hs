@@ -83,8 +83,11 @@ pint = fmap (read . combine) ((opt . pchar $ '-') .>>. (many1 pnumber)) <%> "Int
         let firstChar = mGetOrElse (fst t) '0'
         in firstChar:(snd t)
 
+whitespace :: Parser Char Char 
+whitespace = pchar ' ' <|> pchar '\t' <|> pchar '\n'
+
 w :: Parser Char String
-w = many (pchar ' ' <|> pchar '\t' <|> pchar '\n')
+w = many whitespace
 
 pBrackets :: Parser Char a -> Parser Char a
 pBrackets parser = pchar '(' >> w >>. parser .>> (w >> (pchar ')'))
@@ -393,6 +396,10 @@ parseBool = fmap toBool (pseq "True" <|> pseq "False") where
 parseChar :: Parser Char CharLiteral
 parseChar = fmap CharLiteral $ pchar '\'' >>. (pnumber <|> pletter) .>> pchar '\'' where
 
+parseString :: Parser Char ListLiteral
+parseString = fmap toString $ pchar '"' >>. many (pnumber <|> pletter <|> whitespace) .>> pchar '"' where
+    toString = ListLiteral . fmap (ExpCharLiteral . CharLiteral)
+
 parseList :: Parser Char ListLiteral
 parseList = fmap toList $ pchar '[' >>. opt (p1 .>>. p2) .>> pchar ']' where
     p1 = opt (many (w >>. openExp .>> w .>> pchar ','))
@@ -421,10 +428,11 @@ parseExpressionLookup = fmap ExpressionLookup (boolOpp <|> mathOpp <|> variable)
 
 
 singleTerm :: Parser Char Expression
-singleTerm = (constant <|> bool <|> char <|> list <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
+singleTerm = (constant <|> bool <|> char <|> string <|> list <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
     constant = fmap ExpConst parseConstant
     bool = fmap ExpBoolLiteral parseBool
     char = fmap ExpCharLiteral parseChar
+    string = fmap ExpListLiteral parseString
     list = fmap ExpListLiteral parseList
     ifStatement = fmap ExpIfStatement parseIfStatement
     funcDecleration = fmap ExpFunctionContext parseFuncDecleration
@@ -461,6 +469,12 @@ onlyTBool other = pureFlop $ "Runtime Exception: Expected Bool, got " ++ show ot
 onlyTChar :: ComputationResult -> Executer Char
 onlyTChar (TChar x) = pure x
 onlyTChar other = pureFlop $ "Runtime Exception: Expected Char, got " ++ show other
+
+onlyString :: ComputationResult -> Executer String
+onlyString cr = pure cr >>= onlyTList >>= pure . fmap toChar . filter onlyChar where
+    onlyChar (TChar x) = True
+    onlyChar x = False
+    toChar (TChar x) = x
 
 onlyFC :: ComputationResult -> Executer FunctionContext
 onlyFC (FC x) = pure x
@@ -542,3 +556,18 @@ builtInOr = twoArgBuiltInFunc "Or" doOpp where
         x <- onlyTBool cx
         y <- onlyTBool cy
         (pure . TBool $ (x || y)) >%%. (\r -> show x ++ " || " ++ show y ++ " -> " ++ show r)
+
+
+-- builtInReadFile :: BuiltInFunc -- Scope ComputationResult -> IO (Executer ComputationResult)
+-- builtInReadFile = BuiltInFunc "ReadFile" f where
+
+--     readFile fName = do
+--         handle <- openFile fName ReadMode  
+--         hGetContents handle
+
+--     f :: Scope ComputationResult -> Executer ComputationResult
+--     f pScope = mGetOrElse (do
+--             arg1 <- lookupSymbol "_1" pScope 
+--             pure . return . readFile $ arg1
+--         ) (pureFlop $ "Arg lookup failure on built-in func " ++ name) 
+
