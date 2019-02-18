@@ -2,6 +2,7 @@ import Data.Bifunctor
 import Data.Maybe
 import Data.Either
 import Control.Monad
+import Control.Monad.Trans
 
 import System.IO  
 
@@ -15,15 +16,17 @@ main = do
     handle <- openFile "input.txt" ReadMode  
     contents <- hGetContents handle
     putStr . (flip (++)) "\n" . pullInfo . rp parsed . splitNL $ contents
-    putStr . (flip (++)) "\n" . execute . rp parsed . splitNL $ contents
+    -- display . rp parsed . splitNL $ contents
+    execute . rp parsed . splitNL $ contents
     hClose handle where
         pullInfo (Result (exp, s)) = show exp 
         pullInfo (failure) = show failure 
         parsed = w >>. openExp
         solved = fmap (solve (newScope [])) parsed
 
-        execute (Result (exp, s)) = show . solve (newScope []) $ exp
-        execute (failure) = show failure
+        execute (Result (exp, s)) = display . runExecuterT . solve (newScope []) $ exp
+        execute (failure) = do
+            putStr . show $ failure
 
 -------------------- generic helper dat / funcs --------------------
 
@@ -117,7 +120,7 @@ data Scope a = Scope {
         parent :: Maybe (Scope a)
     }
 
-instance (Show a) => Show (Scope a) where 
+instance Show (Scope a) where 
     show scope = "Some Scope"
 
 newScope :: SymbolTable a -> Scope a
@@ -150,7 +153,7 @@ data FunctionContext = FunctionContext {
 
 data BuiltInFunc = BuiltInFunc {
         name :: String,
-        func :: Scope ComputationResult -> Executer ComputationResult
+        func :: Scope ComputationResult -> ExecuterT IO ComputationResult
     }
 
 data ExpressionLookup = ExpressionLookup String deriving Show
@@ -219,28 +222,86 @@ instance (Show a) => Show (Executer a) where
         showLogs [] = ""
         showLogs (x:xs) = (showLogs xs) ++ "\n" ++ x
 
-pureFlop :: String -> Executer a
-pureFlop msg = Executer [] $ Left msg
+executerFlop :: String -> Executer a
+executerFlop msg = Executer [] $ Left msg
+
+
+-- *********** ExecuterT ***************
+
+newtype ExecuterT m a = ExecuterT { runExecuterT :: m (Executer a) }
+
+instance (Functor m) => Functor (ExecuterT m) where
+    fmap f (ExecuterT action) = ExecuterT $ fmap (fmap f) action
+
+instance (Monad m) => Applicative (ExecuterT m) where
+    pure = ExecuterT . pure . pure
+    (ExecuterT a1) <*> (ExecuterT a2) = ExecuterT $ do
+        e1 <- a1
+        e2 <- a2
+        return $ e1 <*> e2
+
+instance (Monad m) => Monad (ExecuterT m) where
+    return = pure
+    ExecuterT action >>= f = ExecuterT $ do
+        r <- action
+        case r of 
+            (Executer ll (Left msg)) -> return . executerFlop $ msg
+            (Executer ll (Right x))  -> (runExecuterT $ f x) >>= addLogs where
+                addLogs (Executer logs x) = pure $ Executer (ll ++ logs) x
+
+instance MonadTrans ExecuterT where
+    lift x = ExecuterT $ fmap pure x
+
+display :: (Show a) => IO (Executer a) -> IO ()
+display iox = do
+    exec <- iox
+    putStr . show $ exec
+    putChar '\n'
+
+
+pureFlop :: String -> ExecuterT IO a
+pureFlop msg = ExecuterT . return . executerFlop $ msg
+
+liftET2 :: (Monad m) => (Executer a -> f -> Executer a) -> (ExecuterT m a -> f -> ExecuterT m a)
+liftET2 efunc = eTfunc where
+    eTfunc (ExecuterT action) f = ExecuterT $ do
+        r <- action
+        pure . efunc r $ f
 
 appendLog :: Executer a -> String -> Executer a
 appendLog (Executer logs r) newLog = Executer (newLog:logs) r
-( %% ) = appendLog
-( %%. ) = appendLog
 
 prependLog :: Executer a -> String -> Executer a
 prependLog (Executer logs r) newLog = Executer (logs ++ [newLog]) r
-( .%% ) = prependLog
 
 appendContextLog :: Executer a -> (a -> String) -> Executer a
-appendContextLog (Executer logs (Right r)) f = Executer logs (Right r) %%. (f r)
+appendContextLog (Executer logs (Right r)) f = appendLog (Executer logs (Right r)) (f r)
 appendContextLog el f = el
-( >%% ) = appendContextLog
-( >%%. ) = appendContextLog
 
 prependContextLog :: Executer a -> (a -> String) -> Executer a
-prependContextLog (Executer logs (Right r)) f = Executer logs (Right r) .%% (f r)
+prependContextLog (Executer logs (Right r)) f = prependLog (Executer logs (Right r)) (f r)
 prependContextLog el f = el
-( >.%% ) = prependContextLog
+
+
+appendLogT :: ExecuterT IO a -> String -> ExecuterT IO a
+appendLogT = liftET2 appendLog
+( %% ) = appendLogT
+( %%. ) = appendLogT
+
+prependLogT :: ExecuterT IO a -> String -> ExecuterT IO a
+prependLogT = liftET2 prependLog
+( .%% ) = prependLogT
+
+appendContextLogT :: ExecuterT IO a -> (a -> String) -> ExecuterT IO a
+appendContextLogT = liftET2 appendContextLog
+( >%% ) = appendContextLogT
+( >%%. ) = appendContextLogT
+
+
+prependContextLogT :: ExecuterT IO a -> (a -> String) -> ExecuterT IO a
+prependContextLogT = liftET2 prependContextLog
+( >.%% ) = prependContextLogT
+
 
 -- evaluate AST --
 
@@ -250,12 +311,28 @@ data ComputationResult  =   TInt Integer |
                             TList [ComputationResult] |
                             FC FunctionContext
 
-                            deriving Show
+instance Show ComputationResult where
+    show (TInt x) = show x
+    show (TBool x) = show x
+    show (TChar x) = show x
+    show (FC x) = show x
+    show (TList l) = cShow l where
+        cShow ([]) = ""
+        cShow (x:xs) = case x of  
+            (TChar c) -> c:(cShow xs)
+            _ -> (show x) ++ cShow xs
 
 class Solvable a where
-    solve :: Scope ComputationResult -> a -> Executer ComputationResult
+    solve :: Scope ComputationResult -> a -> ExecuterT IO ComputationResult
     logShow :: a -> String
 
+instance Solvable ComputationResult where
+    solve scope cr = pure cr
+    logShow (TInt x) = "TInt " ++ show x
+    logShow (TBool x) = "TBool " ++ show x
+    logShow (TChar x) = "TChar " ++ show x
+    logShow (TList x) = "TList " ++ (show . (fmap logShow) $ x)
+    logShow (FC x) = "FC " ++ show x
 
 instance Solvable Constant where
     solve scope (Constant x) = (pure . TInt $ x) %% ("Found " ++ show x)
@@ -272,13 +349,13 @@ instance Solvable CharLiteral where
 instance Solvable ListLiteral where
     solve scope (ListLiteral listExp) = fmap TList . combineExecutors . fmap (solve scope) $ listExp where
 
-        merge :: Executer [ComputationResult] -> Executer ComputationResult -> Executer [ComputationResult]
+        merge :: (Monad m) => m [ComputationResult] -> m ComputationResult -> m [ComputationResult]
         merge ex1 ex2 = do
             tList <- ex1
             cr2 <- ex2
             pure $ tList ++ [cr2]
 
-        combineExecutors :: [Executer ComputationResult] -> Executer [ComputationResult]
+        combineExecutors :: (Monad m) => [m ComputationResult] -> m [ComputationResult]
         combineExecutors executers = foldl merge (pure []) executers
 
     logShow (ListLiteral listExp) = show listExp 
@@ -315,40 +392,42 @@ instance Solvable IfStatement where
 
 instance Solvable FunctionApplication where
     solve pScope (FunctionApplication prevExp arg) = (solve pScope prevExp) >>= applyCR arg where
-        applyCR :: Expression -> ComputationResult -> Executer ComputationResult
+        applyCR :: Expression -> ComputationResult -> ExecuterT IO ComputationResult
         applyCR argExp (FC (FunctionContext name ss cScope funcExp)) = 
             let newStack = snd . pop $ ss
                 mExpFuncContext = do
                     sym <- fst . pop $ ss
                     x <- pure (do
-                            argCr <- (solve pScope argExp) >%%. (\r -> "Solved arg, got " ++ show r)
+                            argCr <- (solve pScope argExp) >%%. (\r -> "Solved arg, got " ++ logShow r)
                             solve pScope (FunctionContext name newStack (bindToScope cScope sym argCr) funcExp)
                         )
                     return x
             in mGetOrElse mExpFuncContext (pureFlop "Runtime Exception: To many arguments.")
 
-        applyCR argExp cr = pureFlop $ "Runtime Exception: Tried to call non-function " ++ show cr
+        applyCR argExp cr = pureFlop $ "Runtime Exception: Tried to call non-function " ++ logShow cr
         
     logShow funcApp = "[FunctionApplication]"
 
 
-crForBuiltIn :: Scope ComputationResult -> BuiltInFunc -> Executer ComputationResult
-crForBuiltIn pScope (BuiltInFunc name func) = (pure . FC . FunctionContext name (Stack ["_1", "_2"]) pScope . ExpBuiltInFunc $ (BuiltInFunc name func)) %%. ("Built-in func " ++ show name ++ " found")
+crForBuiltIn :: [String] -> Scope ComputationResult -> BuiltInFunc -> ExecuterT IO ComputationResult
+crForBuiltIn argList pScope (BuiltInFunc name func) = (pure . FC . FunctionContext name (Stack argList) pScope . ExpBuiltInFunc $ (BuiltInFunc name func)) %%. ("Built-in func " ++ show name ++ " found")
 
 instance Solvable ExpressionLookup where
     solve pScope (ExpressionLookup symbol)
-        | symbol == "+" = crForBuiltIn pScope builtInAdd
-        | symbol == "-" = crForBuiltIn pScope builtInSub
-        | symbol == "*" = crForBuiltIn pScope builtInMult
-        | symbol == "==" = crForBuiltIn pScope builtInEq
-        | symbol == ">" = crForBuiltIn pScope builtInGT
-        | symbol == "<" = crForBuiltIn pScope builtInLT
-        | symbol == "and" = crForBuiltIn pScope builtInAnd
-        | symbol == "or" = crForBuiltIn pScope builtInOr
+        | symbol == "+" = crForBuiltIn ["_1", "_2"] pScope builtInAdd
+        | symbol == "-" = crForBuiltIn ["_1", "_2"] pScope builtInSub
+        | symbol == "*" = crForBuiltIn ["_1", "_2"] pScope builtInMult
+        | symbol == "==" = crForBuiltIn ["_1", "_2"] pScope builtInEq
+        | symbol == ">" = crForBuiltIn ["_1", "_2"] pScope builtInGT
+        | symbol == "<" = crForBuiltIn ["_1", "_2"] pScope builtInLT
+        | symbol == "and" = crForBuiltIn ["_1", "_2"] pScope builtInAnd
+        | symbol == "or" = crForBuiltIn ["_1", "_2"] pScope builtInOr
+        | symbol == "readFile" = crForBuiltIn ["_1"] pScope builtInReadFile
+        | symbol == "print" = crForBuiltIn ["_1"] pScope builtInPrint
         | otherwise = mGetOrElse (
                 do
                     cr <- lookupSymbol symbol pScope
-                    pure (pure cr %% ("Binding " ++ show cr ++ " to " ++ symbol)) 
+                    pure (pure cr %% ("Binding " ++ logShow cr ++ " to " ++ symbol)) 
             ) (
                 pureFlop $ "Symbol " ++ symbol ++ " not found"
             ) .%% ("Looking for " ++ symbol ++ " with scope " ++ show pScope)
@@ -397,7 +476,7 @@ parseChar :: Parser Char CharLiteral
 parseChar = fmap CharLiteral $ pchar '\'' >>. (pnumber <|> pletter) .>> pchar '\'' where
 
 parseString :: Parser Char ListLiteral
-parseString = fmap toString $ pchar '"' >>. many (pnumber <|> pletter <|> whitespace) .>> pchar '"' where
+parseString = fmap toString $ pchar '"' >>. many (pnumber <|> pletter <|> whitespace <|> pchar '.') .>> pchar '"' where
     toString = ListLiteral . fmap (ExpCharLiteral . CharLiteral)
 
 parseList :: Parser Char ListLiteral
@@ -458,35 +537,36 @@ openExp = pConsume cParser singleTerm where
 
 -- built in functions / stdlib --
 
-onlyTInt :: ComputationResult -> Executer Integer
+onlyTInt :: ComputationResult -> ExecuterT IO Integer
 onlyTInt (TInt x) = pure x
-onlyTInt other = pureFlop $ "Runtime Exception: Expected Int, got " ++ show other
+onlyTInt other = pureFlop $ "Runtime Exception: Expected Int, got " ++ logShow other
 
-onlyTBool :: ComputationResult -> Executer Bool
+onlyTBool :: ComputationResult -> ExecuterT IO Bool
 onlyTBool (TBool x) = pure x
-onlyTBool other = pureFlop $ "Runtime Exception: Expected Bool, got " ++ show other
+onlyTBool other = pureFlop $ "Runtime Exception: Expected Bool, got " ++ logShow other
 
-onlyTChar :: ComputationResult -> Executer Char
+onlyTChar :: ComputationResult -> ExecuterT IO Char
 onlyTChar (TChar x) = pure x
-onlyTChar other = pureFlop $ "Runtime Exception: Expected Char, got " ++ show other
+onlyTChar other = pureFlop $ "Runtime Exception: Expected Char, got " ++ logShow other
 
-onlyString :: ComputationResult -> Executer String
+onlyString :: ComputationResult -> ExecuterT IO String
 onlyString cr = pure cr >>= onlyTList >>= pure . fmap toChar . filter onlyChar where
     onlyChar (TChar x) = True
     onlyChar x = False
     toChar (TChar x) = x
 
-onlyFC :: ComputationResult -> Executer FunctionContext
+onlyFC :: ComputationResult -> ExecuterT IO FunctionContext
 onlyFC (FC x) = pure x
-onlyFC other = pureFlop $ "Runtime Exception: Expected FunctionContext, got " ++ show other
+onlyFC other = pureFlop $ "Runtime Exception: Expected FunctionContext, got " ++ logShow other
 
-onlyTList :: ComputationResult -> Executer [ComputationResult]
+onlyTList :: ComputationResult -> ExecuterT IO [ComputationResult]
 onlyTList (TList x) = pure x
-onlyTList other = pureFlop $ "Runtime Exception: Expected List, got " ++ show other
+onlyTList other = pureFlop $ "Runtime Exception: Expected List, got " ++ logShow other
 
-twoArgBuiltInFunc :: String -> (ComputationResult -> ComputationResult -> Executer ComputationResult) -> BuiltInFunc
+
+twoArgBuiltInFunc :: String -> (ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult) -> BuiltInFunc
 twoArgBuiltInFunc name doOpp = BuiltInFunc name f where
-    f :: Scope ComputationResult -> Executer ComputationResult
+    f :: Scope ComputationResult -> ExecuterT IO ComputationResult
     f pScope = mGetOrElse (do
             arg1 <- lookupSymbol "_1" pScope
             arg2 <- lookupSymbol "_2" pScope 
@@ -495,37 +575,37 @@ twoArgBuiltInFunc name doOpp = BuiltInFunc name f where
 
 builtInAdd :: BuiltInFunc 
 builtInAdd = twoArgBuiltInFunc "Add" doOpp where
-    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp :: ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult
     doOpp cx cy = do
         x <- onlyTInt cx
         y <- onlyTInt cy
-        (pure . TInt $ (x + y)) >%%. (\r -> show x ++ " + " ++ show y ++ " = " ++ show r)
+        (pure . TInt $ (x + y)) >%%. (\r -> show x ++ " + " ++ show y ++ " = " ++ logShow r)
 
 
 builtInSub :: BuiltInFunc 
 builtInSub = twoArgBuiltInFunc "Sub" doOpp where
-    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp :: ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult
     doOpp cx cy = do
         x <- onlyTInt cx
         y <- onlyTInt cy
-        (pure . TInt $ (x - y)) >%%. (\r -> show x ++ " - " ++ show y ++ " = " ++ show r)
+        (pure . TInt $ (x - y)) >%%. (\r -> show x ++ " - " ++ show y ++ " = " ++ logShow r)
 
 
 builtInMult :: BuiltInFunc 
 builtInMult = twoArgBuiltInFunc "Mult" doOpp where
-    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
+    doOpp :: ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult
     doOpp cx cy = do
         x <- onlyTInt cx
         y <- onlyTInt cy
-        (pure . TInt $ (x * y)) >%%. (\r -> show x ++ " * " ++ show y ++ " = " ++ show r)
+        (pure . TInt $ (x * y)) >%%. (\r -> show x ++ " * " ++ show y ++ " = " ++ logShow r)
 
 
 builtInEq :: BuiltInFunc
 builtInEq = twoArgBuiltInFunc "Eq" doOpp where
-    doOpp :: ComputationResult -> ComputationResult -> Executer ComputationResult
-    doOpp (TBool x) (TBool y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ show r)
-    doOpp (TInt x) (TInt y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ show r)
-    doOpp x y = pureFlop $ "Cannot equate two args of different types: " ++ show x ++ " vs " ++ show y
+    doOpp :: ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult
+    doOpp (TBool x) (TBool y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ logShow r)
+    doOpp (TInt x) (TInt y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ logShow r)
+    doOpp x y = pureFlop $ "Cannot equate two args of different types: " ++ logShow x ++ " vs " ++ logShow y
 
 
 builtInGT :: BuiltInFunc
@@ -533,14 +613,14 @@ builtInGT = twoArgBuiltInFunc "GT" doOpp where
     doOpp cx cy = do
         x <- onlyTInt cx
         y <- onlyTInt cy
-        (pure . TBool $ (x > y)) >%%. (\r -> show x ++ " > " ++ show y ++ " -> " ++ show r)
+        (pure . TBool $ (x > y)) >%%. (\r -> show x ++ " > " ++ show y ++ " -> " ++ logShow r)
 
 builtInLT :: BuiltInFunc
 builtInLT = twoArgBuiltInFunc "LT" doOpp where
     doOpp cx cy = do
         x <- onlyTInt cx
         y <- onlyTInt cy
-        (pure . TBool $ (x < y)) >%%. (\r -> show x ++ " < " ++ show y ++ " -> " ++ show r)
+        (pure . TBool $ (x < y)) >%%. (\r -> show x ++ " < " ++ show y ++ " -> " ++ logShow r)
 
 
 builtInAnd :: BuiltInFunc
@@ -548,26 +628,40 @@ builtInAnd = twoArgBuiltInFunc "And" doOpp where
     doOpp cx cy = do
         x <- onlyTBool cx
         y <- onlyTBool cy
-        (pure . TBool $ (x && y)) >%%. (\r -> show x ++ " && " ++ show y ++ " -> " ++ show r)
+        (pure . TBool $ (x && y)) >%%. (\r -> show x ++ " && " ++ show y ++ " -> " ++ logShow r)
 
 builtInOr :: BuiltInFunc
 builtInOr = twoArgBuiltInFunc "Or" doOpp where
     doOpp cx cy = do
         x <- onlyTBool cx
         y <- onlyTBool cy
-        (pure . TBool $ (x || y)) >%%. (\r -> show x ++ " || " ++ show y ++ " -> " ++ show r)
+        (pure . TBool $ (x || y)) >%%. (\r -> show x ++ " || " ++ show y ++ " -> " ++ logShow r)
 
 
--- builtInReadFile :: BuiltInFunc -- Scope ComputationResult -> IO (Executer ComputationResult)
--- builtInReadFile = BuiltInFunc "ReadFile" f where
+builtInReadFile :: BuiltInFunc
+builtInReadFile = BuiltInFunc "ReadFile" f where
 
---     readFile fName = do
---         handle <- openFile fName ReadMode  
---         hGetContents handle
+    readFile :: String -> IO String
+    readFile fName = do
+        handle <- openFile fName ReadMode  
+        hGetContents handle
 
---     f :: Scope ComputationResult -> Executer ComputationResult
---     f pScope = mGetOrElse (do
---             arg1 <- lookupSymbol "_1" pScope 
---             pure . return . readFile $ arg1
---         ) (pureFlop $ "Arg lookup failure on built-in func " ++ name) 
+    f :: Scope ComputationResult -> ExecuterT IO ComputationResult
+    f pScope = mGetOrElse (do
+            crName <- lookupSymbol "_1" pScope
+            Just $ (onlyString crName) >>= lift . fmap (TList . fmap TChar) . readFile
+        ) (pureFlop $ "Arg lookup failure on built-in func ReadFile") 
+
+
+builtInPrint :: BuiltInFunc
+builtInPrint = BuiltInFunc "Print" f where
+    f :: Scope ComputationResult -> ExecuterT IO ComputationResult
+    f pScope = mGetOrElse (do
+            cr <- lookupSymbol "_1" pScope
+            Just $ showAndPassThrough cr
+        ) (pureFlop $ "Arg lookup failure on built-in func Print") where
+
+            showAndPassThrough :: ComputationResult -> ExecuterT IO ComputationResult
+            showAndPassThrough cr = lift $ (putStr . show $ cr) >> pure cr  
+
 

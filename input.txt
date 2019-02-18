@@ -1,4 +1,4 @@
-"lucas is the best"!!(2)
+print (readFile ("input2.txt"))
 
 [
 	+ (-12) (13), 
