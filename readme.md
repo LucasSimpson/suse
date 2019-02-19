@@ -36,15 +36,18 @@ The language itself is powerful enough for decently complex patterns. See 'examp
 
 #### declare a function with name func bound variable x
 ```|func(x) { + (x) (10) }```
-Function(+ x 10)
+
+> Function(+ x 10)
 
 #### invoke a function inline
 ```|func(x) { + (x) (10) } (4)```
-16
+
+> 16
 
 #### functions are first-class and can be passed as arguments
 ```|f(func) { func (10) } ( |addFour(x) { + (4) (x) } )```
-14
+
+> 14
 
 #### Functions can be nested to create multi-argument functions
 ```
@@ -54,7 +57,8 @@ Function(+ x 10)
 	}
 } (-100) (35)
 ```
--65
+
+> -65
 
 #### Functions can then be partiall applied. Also, let statements
 ```
@@ -67,7 +71,8 @@ let
 	addTwo = add (2);
 in addTwo (20)
 ```
-22
+
+> 22
 
 #### Supports Integers, Chars, Booleans, Lists, and provides String literals as a shortcut for a list of chars
 ```
@@ -76,7 +81,8 @@ let
 	myName = "Lucas";
 in + (myList!!(2)) (len(myName))
 ```
-8
+
+> 8
 
 #### Basic IO
 ```
@@ -85,7 +91,8 @@ let
 	fName = "input2.txt";
 in echo (readFile (fName))
 ```
-"Wow it worked!"
+
+> "Wow it worked!"
 
 
 ## More Examples
@@ -106,7 +113,8 @@ let
 	};
 in fmap (+ (2)) ([1, 2, 3])
 ```
-[3, 4, 5]
+
+> [3, 4, 5]
 
 
 #### foldl
@@ -128,6 +136,7 @@ let
 	};
 in foldl (+) (0) ([1, 2, 3])
 ```
-6
+
+> 6
 
 
