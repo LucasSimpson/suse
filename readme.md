@@ -14,11 +14,11 @@ Syntax example:
 
 ```
 |fact(x) {
-	if (< (x) (2)) then (
-		1
-	) else (
-		* (x) (fact (- (x) (1)))
-	)
+    if (< (x) (2)) then (
+        1
+    ) else (
+        * (x) (fact (- (x) (1)))
+    )
 } (10)
 ```
 
@@ -52,9 +52,9 @@ The language itself is powerful enough for decently complex patterns. See 'examp
 #### Functions can be nested to create multi-argument functions
 ```
 |add(x) { 
-	|add_(y) {
-		+ (x) (y)
-	}
+    |add_(y) {
+        + (x) (y)
+    }
 } (-100) (35)
 ```
 
@@ -63,12 +63,12 @@ The language itself is powerful enough for decently complex patterns. See 'examp
 #### Functions can then be partiall applied. Also, let statements
 ```
 let
-	add = |a(x) { 
-		|a_(y) {
-			+ (x) (y)
-		}
-	};
-	addTwo = add (2);
+    add = |a(x) { 
+        |a_(y) {
+            + (x) (y)
+        }
+    };
+    addTwo = add (2);
 in addTwo (20)
 ```
 
@@ -77,8 +77,8 @@ in addTwo (20)
 #### Supports Integers, Chars, Booleans, Lists, and provides String literals as a shortcut for a list of chars
 ```
 let
-	myList = [1, 2, 3];
-	myName = "Lucas";
+    myList = [1, 2, 3];
+    myName = "Lucas";
 in + (myList!!(2)) (len(myName))
 ```
 
@@ -87,8 +87,8 @@ in + (myList!!(2)) (len(myName))
 #### Basic IO
 ```
 let 
-	echo = |f(text) { print (text) };
-	fName = "input2.txt";
+    echo = |f(text) { print (text) };
+    fName = "input2.txt";
 in echo (readFile (fName))
 ```
 
@@ -100,17 +100,17 @@ in echo (readFile (fName))
 #### fmap
 ```
 let
-	fmap = |f(mapFunc) {
-		|l(list) {
-			if (== (0) (len (list))) then (
-				[]
-			) else (
-				concat ([mapFunc (list!!(0))]) (f (mapFunc) (
-					|t(xs) { slice (1) (len (xs)) (xs) } (list))
-				)
-			)
-		}	
-	};
+    fmap = |f(mapFunc) {
+        |l(list) {
+            if (== (0) (len (list))) then (
+                []
+            ) else (
+                concat ([mapFunc (list!!(0))]) (f (mapFunc) (
+                    |t(xs) { slice (1) (len (xs)) (xs) } (list))
+                )
+            )
+        }   
+    };
 in fmap (+ (2)) ([1, 2, 3])
 ```
 
@@ -120,20 +120,20 @@ in fmap (+ (2)) ([1, 2, 3])
 #### foldl
 ```
 let
-	foldl = |f(combFunc) {
-		|s(start) {
-			|l(list) {
-				if (== (len(list)) (0)) then (
-					start
-				) else (
-						f 
-							(combFunc) 
-							(combFunc (start) (list!!(0))) 
-							(|t(xs) { slice (1) (len (xs)) (xs) } (list))
-				)
-			}
-		}
-	};
+    foldl = |f(combFunc) {
+        |s(start) {
+            |l(list) {
+                if (== (len(list)) (0)) then (
+                    start
+                ) else (
+                    f 
+                        (combFunc) 
+                        (combFunc (start) (list!!(0))) 
+                        (|t(xs) { slice (1) (len (xs)) (xs) } (list))
+                )
+            }
+        }
+    };
 in foldl (+) (0) ([1, 2, 3])
 ```
 
