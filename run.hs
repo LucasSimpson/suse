@@ -77,20 +77,26 @@ pletter = anyOf "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 pnumber :: Parser Char Char
 pnumber = anyOf "0123456789"
 
+whitespace :: Parser Char Char 
+whitespace = pchar ' ' <|> pchar '\t' <|> pchar '\n'
+
+punctuation :: Parser Char Char
+punctuation = anyOf ".,'\"!?-~"
+
 pword :: Parser Char String
 pword = many1 pletter
 
 pint :: Parser Char Integer
 pint = fmap (read . combine) ((opt . pchar $ '-') .>>. (many1 pnumber)) <%> "Integer" where
-    combine t = 
+    combine t =
         let firstChar = mGetOrElse (fst t) '0'
         in firstChar:(snd t)
 
-whitespace :: Parser Char Char 
-whitespace = pchar ' ' <|> pchar '\t' <|> pchar '\n'
-
-w :: Parser Char String
-w = many whitespace
+w :: Parser Char [String]
+w = ws >> many (comment >> ws) where
+    comment = pseq "##" >> many (whitespace <|> pnumber <|> pletter <|> punctuation <|> cmsc) >> pseq "##"
+    cmsc = anyOf "!@$%^&*()[]{}|+-=/:;><"
+    ws = many whitespace
 
 pBrackets :: Parser Char a -> Parser Char a
 pBrackets parser = pchar '(' >> w >>. parser .>> (w >> (pchar ')'))
@@ -163,6 +169,7 @@ data FunctionApplication = FunctionApplication {
     } deriving Show
 
 data IfStatement = IfStatement Expression Expression Expression deriving Show
+data LetStatement = LetStatement [(String, Expression)] Expression deriving Show
 
 data Expression =   ExpFunctionContext FunctionContext |  
                     ExpConst Constant |
@@ -171,6 +178,7 @@ data Expression =   ExpFunctionContext FunctionContext |
                     ExpListLiteral ListLiteral |
                     ExpListIndex ListIndex |
                     ExpIfStatement IfStatement |
+                    ExpLetStatement LetStatement |
                     ExpFunctionApplication FunctionApplication |
                     ExpExpressionLookup ExpressionLookup |
                     ExpBuiltInFunc BuiltInFunc
@@ -189,6 +197,7 @@ instance Show Expression where
     show (ExpExpressionLookup el) = show el
     show (ExpBuiltInFunc bif) = show bif
     show (ExpIfStatement ie) = show ie
+    show (ExpLetStatement ls) = show ls
 
 -- runtime monad --
 
@@ -316,11 +325,22 @@ instance Show ComputationResult where
     show (TBool x) = show x
     show (TChar x) = show x
     show (FC x) = show x
-    show (TList l) = cShow l where
-        cShow ([]) = ""
-        cShow (x:xs) = case x of  
-            (TChar c) -> c:(cShow xs)
-            _ -> (show x) ++ cShow xs
+    show (TList l) = if allTChar l then showString l else cShow l where
+        allTChar l = foldl (&&) True (fmap isChar l)
+
+        isChar (TChar c) = True
+        isChar _ = False
+
+        showString xs = "\"" ++ showString' xs ++ "\""
+        showString' ([]) = ""
+        showString' (x:xs) = case x of  
+            (TChar c) -> c:(showString' xs)
+            _ -> (show x) ++ showString' xs
+
+        cShow xs = "[" ++ cShow' xs ++ "]"
+        cShow' ([]) = ""
+        cShow' (x:[]) = show x
+        cShow' (x:xs) = show x ++ ", " ++ cShow' xs
 
 class Solvable a where
     solve :: Scope ComputationResult -> a -> ExecuterT IO ComputationResult
@@ -408,9 +428,21 @@ instance Solvable FunctionApplication where
         
     logShow funcApp = "[FunctionApplication]"
 
+instance Solvable LetStatement where
+    solve pScope (LetStatement boundVars exp) = augmentedScope >>= \s -> solve s exp where
+        augmentedScope = foldl f (pure pScope) boundVars
+
+        f :: ExecuterT IO (Scope ComputationResult) -> (String, Expression) -> ExecuterT IO (Scope ComputationResult)
+        f execTScope (var, varExp) = do
+            scope <- execTScope
+            varResult <- solve scope varExp
+            pure $ bindToScope scope var varResult
+
+    logShow (LetStatement boundVars exp) = "LetStatement(" ++ show (fmap fst boundVars) ++ ")"
+
 
 crForBuiltIn :: [String] -> Scope ComputationResult -> BuiltInFunc -> ExecuterT IO ComputationResult
-crForBuiltIn argList pScope (BuiltInFunc name func) = (pure . FC . FunctionContext name (Stack argList) pScope . ExpBuiltInFunc $ (BuiltInFunc name func)) %%. ("Built-in func " ++ show name ++ " found")
+crForBuiltIn argList pScope (BuiltInFunc name func) = (pure . FC . FunctionContext name (Stack argList) pScope . ExpBuiltInFunc $ (BuiltInFunc name func)) .%% ("Built-in func " ++ show name ++ " found")
 
 instance Solvable ExpressionLookup where
     solve pScope (ExpressionLookup symbol)
@@ -424,10 +456,12 @@ instance Solvable ExpressionLookup where
         | symbol == "or" = crForBuiltIn ["_1", "_2"] pScope builtInOr
         | symbol == "readFile" = crForBuiltIn ["_1"] pScope builtInReadFile
         | symbol == "print" = crForBuiltIn ["_1"] pScope builtInPrint
-        | otherwise = mGetOrElse (
-                do
-                    cr <- lookupSymbol symbol pScope
-                    pure (pure cr %% ("Binding " ++ logShow cr ++ " to " ++ symbol)) 
+        | symbol == "len" = crForBuiltIn ["_1"] pScope builtInLength
+        | symbol == "slice" = crForBuiltIn ["_1", "_2", "_3"] pScope builtInSlice
+        | symbol == "concat" = crForBuiltIn ["_1", "_2"] pScope builtInConcat
+        | otherwise = mGetOrElse (do
+                cr <- lookupSymbol symbol pScope
+                pure (pure cr %% ("Binding " ++ logShow cr ++ " to " ++ symbol)) 
             ) (
                 pureFlop $ "Symbol " ++ symbol ++ " not found"
             ) .%% ("Looking for " ++ symbol ++ " with scope " ++ show pScope)
@@ -446,6 +480,7 @@ instance Solvable Expression where
     solve pScope (ExpListLiteral exp) = (pure exp >>= solve pScope) .%% "Solving ListLiteral"
     solve pScope (ExpListIndex exp) = (pure exp >>= solve pScope) .%% "Solving ListIndex"
     solve pScope (ExpIfStatement exp) = (pure exp >>= solve pScope) .%% "Solving IfStatement"
+    solve pScope (ExpLetStatement exp) = (pure exp >>= solve pScope) .%% "Solving LetStatement"
     solve pScope (ExpFunctionApplication exp) = (pure exp >>= solve pScope) .%% ("Solving FunctionApplication with scope " ++ show pScope)
     solve pScope (ExpExpressionLookup exp) = (pure exp >>= solve pScope) .%% "Solving ExpressionLookup"
     solve pScope (ExpBuiltInFunc exp) = (pure exp >>= solve pScope) .%% ("Solving BuiltInFunc with scope " ++ show pScope)
@@ -457,6 +492,7 @@ instance Solvable Expression where
     logShow (ExpListLiteral exp) = logShow exp
     logShow (ExpListIndex exp) = logShow exp
     logShow (ExpIfStatement exp) = logShow exp
+    logShow (ExpLetStatement exp) = logShow exp
     logShow (ExpFunctionApplication exp) = logShow exp
     logShow (ExpExpressionLookup exp) = logShow exp
     logShow (ExpBuiltInFunc exp) = logShow exp
@@ -499,6 +535,14 @@ parseIfStatement = fmap toIf $ pseq "if" >>. oe .>>. (pseq "then" >>. oe) .>>. (
     oe = w >>. pBrackets openExp .>> w
     toIf ((condExp, trueExp), falseExp) = IfStatement condExp trueExp falseExp
 
+
+parseLetStatement :: Parser Char LetStatement
+parseLetStatement = fmap toLet $ pseq "let" >> w >>. many1 varExpP .>> pseq "in" .>> w .>>. openExp where
+    varExpP = pword .>> w .>> pchar '=' .>> w .>>. openExp .>> w .>> pchar ';' .>> w
+
+    toLet :: ([(String, Expression)], Expression) -> LetStatement
+    toLet (boundExps, exp) = LetStatement boundExps exp
+
 parseExpressionLookup :: Parser Char ExpressionLookup
 parseExpressionLookup = fmap ExpressionLookup (boolOpp <|> mathOpp <|> variable) where
     variable = pword
@@ -507,13 +551,14 @@ parseExpressionLookup = fmap ExpressionLookup (boolOpp <|> mathOpp <|> variable)
 
 
 singleTerm :: Parser Char Expression
-singleTerm = (constant <|> bool <|> char <|> string <|> list <|> ifStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
+singleTerm = (constant <|> bool <|> char <|> string <|> list <|> ifStatement <|> letStatement <|> funcDecleration <|> expLookup <|> pBrackets singleTerm) <%> "Single Term" where
     constant = fmap ExpConst parseConstant
     bool = fmap ExpBoolLiteral parseBool
     char = fmap ExpCharLiteral parseChar
     string = fmap ExpListLiteral parseString
     list = fmap ExpListLiteral parseList
     ifStatement = fmap ExpIfStatement parseIfStatement
+    letStatement = fmap ExpLetStatement parseLetStatement
     funcDecleration = fmap ExpFunctionContext parseFuncDecleration
     expLookup = fmap ExpExpressionLookup parseExpressionLookup
 
@@ -536,6 +581,9 @@ openExp = pConsume cParser singleTerm where
 
 
 -- built in functions / stdlib --
+
+crGuard :: (a -> Bool) -> String -> a -> ExecuterT IO a
+crGuard f msg x = if f x then pure x else pureFlop msg
 
 onlyTInt :: ComputationResult -> ExecuterT IO Integer
 onlyTInt (TInt x) = pure x
@@ -605,6 +653,7 @@ builtInEq = twoArgBuiltInFunc "Eq" doOpp where
     doOpp :: ComputationResult -> ComputationResult -> ExecuterT IO ComputationResult
     doOpp (TBool x) (TBool y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ logShow r)
     doOpp (TInt x) (TInt y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ logShow r)
+    doOpp (TChar x) (TChar y) = (pure . TBool $ (x == y)) >%%. (\r -> show x ++ "==" ++ show y ++ " -> " ++ logShow r)
     doOpp x y = pureFlop $ "Cannot equate two args of different types: " ++ logShow x ++ " vs " ++ logShow y
 
 
@@ -665,3 +714,40 @@ builtInPrint = BuiltInFunc "Print" f where
             showAndPassThrough cr = lift $ (putStr . show $ cr) >> pure cr  
 
 
+builtInLength :: BuiltInFunc
+builtInLength = BuiltInFunc "Length" f where
+    f :: Scope ComputationResult -> ExecuterT IO ComputationResult
+    f pScope = mGetOrElse (do
+            cr <- lookupSymbol "_1" pScope
+            Just $ (onlyTList cr) >>= pure . TInt . len
+        ) (pureFlop $ "Arg lookup failure on built-in func Length") where
+            len ([]) = 0
+            len (x:xs) = 1 + len (xs)
+
+builtInSlice :: BuiltInFunc
+builtInSlice = BuiltInFunc "Slice" f where
+    f :: Scope ComputationResult -> ExecuterT IO ComputationResult
+    f pScope = mGetOrElse (do
+            start <- lookupSymbol "_1" pScope
+            end <- lookupSymbol "_2" pScope
+            list <- lookupSymbol "_3" pScope
+
+            Just $ (do
+                    i <- onlyTInt start >>= crGuard (>= 0) "Slice start must be >= 0."
+                    j <- onlyTInt end >>= crGuard (>= i) "Slice end must be >= than start."
+                    l <- onlyTList list
+                    (pure . TList $ slice i j l)
+                )
+        ) (pureFlop $ "Arg lookup failure on built-in func Length") where
+            slice :: Integer -> Integer -> [a] -> [a]
+            slice i j [] = []
+            slice 0 0 xs = []
+            slice 0 j (x:xs) = x:(slice 0 (j-1) xs)
+            slice i j (x:xs) = slice (i-1) (j-1) xs
+            
+builtInConcat :: BuiltInFunc
+builtInConcat = twoArgBuiltInFunc "Concat" doOpp where
+    doOpp cx cy = do
+        x <- onlyTList cx
+        y <- onlyTList cy
+        pure . TList $ (x ++ y)

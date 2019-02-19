@@ -1,267 +1,137 @@
-print (readFile ("input2.txt"))
 
-[
-	+ (-12) (13), 
-	'a', 
-	[|double(x) { * (x) (2) }]
-]!!(2)!!(0)(100)
+## 
+	This code outputs 'Right [True, " it worked!", "Wow"]' 
+	Lucas Simpson, 2019-02-18 20:13 EST, Toronto, Canada
+##
 
+let 
 
-|fact(x) {
-	if (== (x) (1)) then (1) else (
-		* (x) (fact (- (x) (1)))
-	)
-} (10)
+## run top level parser ##
+runParser = |p(parser) { parser (readFile ("input2.txt")) };
 
+## Get everything except the first element in a list ##
+tail = |t(xs) { slice (1) (len (xs)) (xs) };
 
+## fmap for lists ##
+listFmap = |f(mapFunc) {
+	|l(list) {
+		if (== (0) (len (list))) then (
+			[]
+		) else (
+			concat ([mapFunc (list!!(0))]) (f (mapFunc) (
+				|t(xs) { slice (1) (len (xs)) (xs) } (list))
+			)
+		)
+	}	
+};
 
-
-
-
-|add(x){ + (x) (x) } (10)
-
-
-+ (2) (3)
-
-
-
-
-
-
-[1, 2, 3]!!(0)
-
-
-
-
-[]
-
-
-
-
-
-|num(x) {
-	if (== (x) (1)) then (1) else (
-		+ (x) (num (- (x) (1)))
-	)
-} (10)
-
-
-
-|plusTwo(x) {
-	+ (x) (x)
-} (
-	if (> (200) (199)) then (10) else (99)
-)
-
-
-
-|plusTwo(oldFunc) {
-	|newFunc(y) {
-		+ (oldFunc (y)) (10)
-	}
-} (
-	|square(x) { * (x) (x) }
-) (
-	- (20) (13)
-)
-
-
-
-|add(x) {
-	|curry(y) {
-		|test(z) {
-			- (x) (- (y) (z))
+## oh yeah we better believe can foldl ##
+foldl = |f(combFunc) {
+	|s(start) {
+		|l(list) {
+			if (== (len(list)) (0)) then (
+				start
+			) else (
+					f 
+						(combFunc) 
+						(combFunc (start) (list!!(0))) 
+						(|t(xs) { slice (1) (len (xs)) (xs) } (list))
+			)
 		}
 	}
-} (10) (20) (30)
+};
 
-
-|plusTwo(x) {
-	+ (x) (2)
-} (10)
-
-- (10) (* (4) (3))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-if (> (1) (2)) then (and (True) (False)) else (or (True) (False))
-
-
-
-
-
-
-
-|x.(
-	if (- (x) (2)) then (10) else (20)
-) (100)
-
-
-
-
-
-
-
-
-
-|x.(
-	+ (* (x) (x)) (100)
-)(50)
-
-
-
-
-|x.(+ (x) (x))( * (10) (20))
-
-
-
-
-
-
-
-
-
-
-
-(function(y) {
-	alert(y(
-		function(givenFact) {
-			return function(n) {
-				if( n < 2 ) return 1;
-				else return n * givenFact(n-1);
-			}
-		}
-	)(5)); // Outputs 120 
-	
-	alert(y(
-		function(givenFib) {
-			return function(n) {
-				if( n<=2 ) return 1;
-				else return givenFib(n-1) + givenFib(n-2);
-			}
-		}
-	)(5)); // Outputs 5
-	
-})(
-	function(le) {
-		return (function(f) { 
-			return f(f); 
-		})(function(f) {
-			return le(
-				function(x) { return (f(f))(x); }
-			);
-		});
+## create a parser from a condition function ##
+## Parser returns [success :: Bool, remInput :: String, match :: String]  ##
+createParser = |cp(condFunc) {
+	|parser(text) {
+		if (== (len (text)) (0)) then (
+			[False, text, ""]
+		) else (
+			if (condFunc (text!!(0))) then (
+				[True, tail (text), text!!(0)]
+			) else (
+				[False, text, ""]
+			)
+		)
 	}
-);
+};
 
+## Create a parser for a single character ##
+pChar = |c(wantedChar) {
+	createParser (
+		|x(inputChar) { == (wantedChar) (inputChar) }
+	)	
+};
 
+## map parser output ##
+parserFmap = |f(mapFunc) {
+	|p(parser) {
+		|newParser(text) {
+			let 
+				result = parser(text);
+				didSucceed = result!!(0);
+				remText = result!!(1);
+				match = result!!(2);
+			in if (didSucceed) then (
+				[True, remText, mapFunc(match)]
+			) else (
+				result
+			)
+		}
+	}	
+};
 
+## bind parsers together (>>=) ##
+parserBind = |p(parser) {
+	|bf(bindFunc) {
+		|newParser(text) {
+			let
+			firstParserResult = parser(text);
+			didSucceed = firstParserResult!!(0);
+			remText = firstParserResult!!(1);
+			match = firstParserResult!!(2);
 
+			in if (didSucceed) then (
+				let
+					builtParser = bindFunc(match);
+				in builtParser(remText)
+			) else (
+				firstParserResult
+			)
+		}
+	}
+};
 
-|a.(
-	|b.(
-		+ (!a (20) (10)) (!b (3))
-	)
-)(
-	|x.(
-		|y.(
-			- (x) (y)
+## convert char to list ##
+toList = |f(x) { [x] };
+
+## match two parser succesively, results in list ##
+pCont = |x(parserOne) {
+	|y(parserTwo) {
+		parserBind (parserOne) (	
+			|x(r) {  
+				parserFmap (concat (r)) (parserTwo)  
+			}	
 		)
-	)
-)(
-	|x.(
-		|y.(
-			* (x) (y)
+	}	
+};
+
+## make parser for a sequence of characters ##
+pSeq = |s(sequence) {
+	let 
+		listParsers = listFmap (
+				|c(char) {
+					parserFmap (toList) (pChar (char))
+				}
+			) (sequence);
+	in  if (== (len (listParsers)) (1)) then (
+			listParsers!!(0)
+		) else (
+			foldl (pCont) (listParsers!!(0)) (tail (listParsers))
 		)
-	) (4)
-)
+};
 
-
-
-
-|x.(
-	!x (1)
-) (
-	|z.( + (z) (z) )
-)
-
-
-
-
-
-
-
-
-FunctionContext {
-	symbolStack = Stack ["y","f"], 
-	symbolTable = [("x", FunctionContext {
-		symbolStack = Stack ["z"], 
-		symbolTable = [], 
-		expression = FunctionCall "f" (Stack [
-			FunctionCall "z" (Stack [ExpBoundVar (BoundVar "z")])
-		])
-	})], 
-
-	expression = FunctionCall "f" (Stack [
-		FunctionCall "x" (Stack [ExpBoundVar (BoundVar "x")])
-	])
-}
-
-
-
-
-
-
-
-
-|w.(
-	!w (
-		|y.(
-			* (y) (y)	
-		)
-	)
-)(
-	|x.(
-		!x (30)
-	)
-)
-
-
-
-
-
-
-
-
-
-
-
-|x.(
-	|y.(
-		|z.(
-			* + x y z
-		)
-	)
-)(5)(- 20 10)(2)
-
-
-
-+ 10 50
-
-
-
-
-
+## let the magic start ##
+in runParser (pSeq ("Wow"))
 
