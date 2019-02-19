@@ -31,7 +31,8 @@ The language itself is powerful enough for decently complex patterns. See 'examp
 #### Math statement, using polish notation
 
 ```+ (4) (10)```
-16
+
+> 16
 
 #### declare a function with name func bound variable x
 ```|func(x) { + (x) (10) }```
