@@ -34,10 +34,10 @@ import Stack
 import ExecuterT
 
 
-data Constant = Constant Integer deriving Show
-data BoolLiteral = BoolLiteral Bool deriving Show
-data CharLiteral = CharLiteral Char deriving Show
-data ListLiteral = ListLiteral [Expression] deriving Show
+newtype Constant = Constant Integer deriving Show
+newtype BoolLiteral = BoolLiteral Bool deriving Show
+newtype CharLiteral = CharLiteral Char deriving Show
+newtype ListLiteral = ListLiteral [Expression] deriving Show
 
 data ListIndex = ListIndex Expression Expression deriving Show
 

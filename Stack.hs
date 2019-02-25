@@ -8,7 +8,7 @@ module Stack
 ) where
 
 
-data Stack a = Stack [a] deriving Show
+newtype Stack a = Stack [a] deriving Show
 
 newStack :: Stack a
 newStack = Stack []
